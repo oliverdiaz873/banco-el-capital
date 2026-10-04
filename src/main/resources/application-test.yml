@@ -1,0 +1,12 @@
+# Test profile: no external DB required for unit tests.
+# Integration tests requiring PostgreSQL use Testcontainers (needs Docker) and override the datasource dynamically.
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/banco_test
+    username: banco
+    password: banco
+  jpa:
+    hibernate:
+      ddl-auto: validate
+  flyway:
+    enabled: false

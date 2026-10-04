@@ -1,0 +1,13 @@
+# Local profile. No secrets in repo: use environment variables.
+# Requires PostgreSQL 16 (Docker prerequisite, e.g. postgres:16-alpine).
+# Example: docker run --name banco-pg -e POSTGRES_DB=banco -e POSTGRES_USER=banco -e POSTGRES_PASSWORD=banco -p 5432:5432 -d postgres:16-alpine
+spring:
+  datasource:
+    url: ${DATABASE_URL:jdbc:postgresql://localhost:5432/banco}
+    username: ${DATABASE_USER:banco}
+    password: ${DATABASE_PASSWORD:banco}
+    driver-class-name: org.postgresql.Driver
+  flyway:
+    url: ${DATABASE_URL:jdbc:postgresql://localhost:5432/banco}
+    user: ${DATABASE_USER:banco}
+    password: ${DATABASE_PASSWORD:banco}
