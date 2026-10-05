@@ -1,8 +1,9 @@
 package com.bancoelcapital.identity;
 
-import org.springframework.stereotype.Service;
-
-@Service
+/**
+ * Transitional stub, NOT wired as a bean. The productive gateway is JpaIdentityGateway backed by
+ * Customers. Kept without @Service so AccountCreationService resolves the real implementation.
+ */
 public class StubIdentityGateway implements IdentityGateway {
 
   @Override
