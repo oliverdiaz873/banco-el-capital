@@ -11,8 +11,10 @@ import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 
 /**
- * Account aggregate root (ADR-03). Owns lifecycle, holder relationship, product reference and
- * operability. It MUST NOT calculate financial movements.
+ * Account aggregate root (ADR-03). Owns lifecycle, holder relationship, product reference,
+ * operability, and stored balance state (ADR-15). It MUST NOT calculate financial movements;
+ * balance changes only through an Accounts-owned contract applied by Financial Operations
+ * coordination.
  */
 @Entity
 @Table(name = "accounts")
@@ -33,6 +35,9 @@ public class Account {
   @Column(nullable = false, length = 16)
   private AccountStatus status;
 
+  @Column(name = "balance_minor_units", nullable = false)
+  private Long balanceMinorUnits;
+
   @Column(name = "created_at", nullable = false)
   private Instant createdAt;
 
@@ -44,6 +49,7 @@ public class Account {
     this.currency = currency;
     this.productCode = productCode;
     this.status = AccountStatus.ACTIVE;
+    this.balanceMinorUnits = 0L;
     this.createdAt = Instant.now();
   }
 
@@ -65,6 +71,18 @@ public class Account {
 
   public AccountStatus getStatus() {
     return status;
+  }
+
+  public Long getBalanceMinorUnits() {
+    return balanceMinorUnits;
+  }
+
+  /**
+   * Applies a confirmed credit to stored balance (ADR-15). Overflow can never wrap silently;
+   * callers treat the arithmetic failure as a technical outcome, not a business rejection.
+   */
+  public void applyCredit(long amountMinorUnits) {
+    this.balanceMinorUnits = Math.addExact(this.balanceMinorUnits, amountMinorUnits);
   }
 
   public Instant getCreatedAt() {
