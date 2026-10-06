@@ -12,5 +12,38 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
-      - name: Build and unit tests
-        run: ./mvnw -B -ntp verify
+      - name: Build and fast tests (H2, excludes PostgreSQL)
+        run: "./mvnw -B -ntp verify -Dtest='!*Postgres*'"
+  postgres:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: PostgreSQL integration tests (Testcontainers, postgres:16-alpine)
+        run: "./mvnw -B -ntp verify -Dtest='*Postgres*'"
+      - name: Prove PostgreSQL tests really ran (fail on skip or zero tests)
+        if: always()
+        run: |
+          python3 - <<'EOF'
+          import glob, sys, xml.etree.ElementTree as ET
+          tests = skipped = failures = errors = 0
+          files = glob.glob('target/surefire-reports/TEST-*Postgres*.xml')
+          for f in files:
+              r = ET.parse(f).getroot()
+              tests += int(r.get('tests', 0))
+              skipped += int(r.get('skipped', 0))
+              failures += int(r.get('failures', 0))
+              errors += int(r.get('errors', 0))
+          print(f'PostgreSQL tests: {tests}, skipped: {skipped},'
+                f' failures: {failures}, errors: {errors} ({len(files)} classes)')
+          if tests == 0:
+              sys.exit('GATE FAILED: 0 PostgreSQL tests executed')
+          if skipped > 0:
+              sys.exit(f'GATE FAILED: {skipped} PostgreSQL tests skipped (Docker required)')
+          if failures > 0 or errors > 0:
+              sys.exit('GATE FAILED: PostgreSQL test failures')
+          print('POSTGRESQL GATE: all executed, none skipped, none failed')
+          EOF

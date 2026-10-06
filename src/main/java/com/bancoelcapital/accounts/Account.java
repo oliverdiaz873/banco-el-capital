@@ -85,6 +85,16 @@ public class Account {
     this.balanceMinorUnits = Math.addExact(this.balanceMinorUnits, amountMinorUnits);
   }
 
+  /**
+   * Applies a confirmed debit to stored balance (ADR-16). Underflow can never wrap silently;
+   * callers treat the arithmetic failure as a technical outcome, not a business rejection. Business
+   * preconditions (positive amount, sufficient funds) are verified by the Accounts-owned debit
+   * contract before invoking this operation.
+   */
+  public void applyDebit(long amountMinorUnits) {
+    this.balanceMinorUnits = Math.subtractExact(this.balanceMinorUnits, amountMinorUnits);
+  }
+
   public Instant getCreatedAt() {
     return createdAt;
   }
