@@ -55,13 +55,14 @@ class WithdrawalPostgresSchemaTest extends AbstractPostgresTest {
                     + " and column_name = 'operation_id'",
                 String.class))
         .isEqualTo("YES");
+    // request_hash is VARCHAR(64) since V7 (JPA String mapping compatibility).
     assertThat(
             jdbc.queryForObject(
                 "select data_type from information_schema.columns"
                     + " where table_name = 'withdrawal_operation_idempotency'"
                     + " and column_name = 'request_hash'",
                 String.class))
-        .isEqualTo("character");
+        .isEqualTo("character varying");
   }
 
   @Test
