@@ -15,6 +15,12 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import com.bancoelcapital.accounts.api.AccountCreditCommand;
+import com.bancoelcapital.accounts.api.AccountCreditResult;
+import com.bancoelcapital.accounts.api.AccountCreditService;
+import com.bancoelcapital.accounts.internal.Account;
+import com.bancoelcapital.accounts.internal.AccountRepository;
+
 @ExtendWith(MockitoExtension.class)
 class AccountCreditServiceTest {
 

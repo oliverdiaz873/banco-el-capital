@@ -10,6 +10,10 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
 import org.springframework.boot.test.autoconfigure.orm.jpa.TestEntityManager;
 
+import com.bancoelcapital.accounts.internal.Account;
+import com.bancoelcapital.accounts.internal.AccountCreationIdempotency;
+import com.bancoelcapital.accounts.internal.CreationOutcome;
+
 import jakarta.persistence.PersistenceException;
 
 /** Repository slice on H2 (transitory until Docker enables Testcontainers PG). */

@@ -17,16 +17,16 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 
-import com.bancoelcapital.accounts.AccountCreationCommand;
-import com.bancoelcapital.accounts.AccountCreationService;
-import com.bancoelcapital.customers.CustomerCreationCommand;
-import com.bancoelcapital.customers.CustomerCreationService;
-import com.bancoelcapital.financialops.DepositCommand;
-import com.bancoelcapital.financialops.DepositService;
-import com.bancoelcapital.financialops.WithdrawalCommand;
-import com.bancoelcapital.financialops.WithdrawalOperationException;
-import com.bancoelcapital.financialops.WithdrawalResult;
-import com.bancoelcapital.financialops.WithdrawalService;
+import com.bancoelcapital.accounts.internal.AccountCreationCommand;
+import com.bancoelcapital.accounts.internal.AccountCreationService;
+import com.bancoelcapital.customers.internal.CustomerCreationCommand;
+import com.bancoelcapital.customers.internal.CustomerCreationService;
+import com.bancoelcapital.financialops.deposit.DepositCommand;
+import com.bancoelcapital.financialops.deposit.DepositService;
+import com.bancoelcapital.financialops.withdrawal.WithdrawalCommand;
+import com.bancoelcapital.financialops.withdrawal.WithdrawalOperationException;
+import com.bancoelcapital.financialops.withdrawal.WithdrawalResult;
+import com.bancoelcapital.financialops.withdrawal.WithdrawalService;
 import com.bancoelcapital.identity.AuthenticatedActor;
 
 /**

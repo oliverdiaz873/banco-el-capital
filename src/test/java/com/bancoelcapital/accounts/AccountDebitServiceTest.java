@@ -15,6 +15,12 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import com.bancoelcapital.accounts.api.AccountDebitCommand;
+import com.bancoelcapital.accounts.api.AccountDebitResult;
+import com.bancoelcapital.accounts.api.AccountDebitService;
+import com.bancoelcapital.accounts.internal.Account;
+import com.bancoelcapital.accounts.internal.AccountRepository;
+
 @ExtendWith(MockitoExtension.class)
 class AccountDebitServiceTest {
 

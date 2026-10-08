@@ -9,6 +9,10 @@ import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
 import org.springframework.boot.test.autoconfigure.orm.jpa.TestEntityManager;
 import org.springframework.context.annotation.Import;
 
+import com.bancoelcapital.customers.internal.Customer;
+import com.bancoelcapital.customers.internal.CustomerCreationIdempotency;
+import com.bancoelcapital.customers.internal.CustomerCreationOutcome;
+import com.bancoelcapital.customers.internal.JpaIdentityGateway;
 import com.bancoelcapital.identity.IdentityGateway;
 
 import jakarta.persistence.PersistenceException;

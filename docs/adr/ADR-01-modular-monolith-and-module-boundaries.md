@@ -146,6 +146,14 @@ A future module extraction will require sufficient evidence, for example:
 
 No decision is made now about when an extraction will happen.
 
+### Physical Representation (Addendum)
+The logical modularity defined above also has an explicit physical feature-based representation
+(see ADR-17). Boundaries do not rely on packages alone: permitted dependencies are expressed
+through module contracts (`api/`), implementations stay encapsulated (`internal/`), and HTTP
+boundaries live with their own feature (`web/`). These are encapsulation mechanisms, not a
+mandatory template: a package exists only where it adds real encapsulation. ArchUnit verifies
+the boundaries at build time.
+
 ## Consequences
 - What becomes easier or more possible:
   - explicit boundaries;
