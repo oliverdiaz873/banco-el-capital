@@ -32,6 +32,20 @@ class StubAuthorizationServiceTest {
   }
 
   @Test
+  void selfActorIsAllowedToTransfer() {
+    var actor = new AuthenticatedActor("holder-1", Set.of());
+
+    assertThat(service.decideTransfer(actor, "holder-1").allowed()).isTrue();
+  }
+
+  @Test
+  void otherHolderIsDeniedTransfer() {
+    var other = new AuthenticatedActor("holder-2", Set.of());
+
+    assertThat(service.decideTransfer(other, "holder-1").allowed()).isFalse();
+  }
+
+  @Test
   void missingActorIsDeniedAsUnauthenticated() {
     for (AuthenticatedActor anonymous :
         new AuthenticatedActor[] {

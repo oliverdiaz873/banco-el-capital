@@ -11,7 +11,7 @@ import org.testcontainers.utility.DockerImageName;
 /**
  * Shared PostgreSQL 16 validation infrastructure (project target engine). Exactly one container is
  * started per JVM (singleton static initializer) and reused by every subclass; Flyway migrates
- * V1-V7 once and JPA validates against the real schema. A per-class {@code @Container} is
+ * V1-V8 once and JPA validates against the real schema. A per-class {@code @Container} is
  * deliberately not used: under JUnit 5 it creates one container per test class and the instances
  * accumulate until JVM exit. H2 remains the fast default suite: these tests are skipped (not
  * failed) wherever Docker is unavailable, so {@code ./mvnw -B -ntp verify} stays green without
