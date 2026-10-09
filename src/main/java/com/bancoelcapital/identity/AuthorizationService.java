@@ -1,6 +1,9 @@
 package com.bancoelcapital.identity;
 
-/** Decides whether an actor MAY request account, customer, deposit, or withdrawal operations. */
+/**
+ * Decides whether an actor MAY request account, customer, deposit, withdrawal, or transfer
+ * operations.
+ */
 public interface AuthorizationService {
   AuthorizationDecision decideCreateAccount(AuthenticatedActor actor, String holderCustomerId);
 
@@ -9,4 +12,6 @@ public interface AuthorizationService {
   AuthorizationDecision decideDeposit(AuthenticatedActor actor, String holderCustomerId);
 
   AuthorizationDecision decideWithdraw(AuthenticatedActor actor, String holderCustomerId);
+
+  AuthorizationDecision decideTransfer(AuthenticatedActor actor, String sourceHolderCustomerId);
 }

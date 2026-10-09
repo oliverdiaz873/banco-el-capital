@@ -189,6 +189,26 @@ class ModuleBoundariesTest {
   }
 
   @Test
+  void transferServiceUsesAccountsContracts() {
+    ArchRule credits =
+        classes()
+            .that()
+            .haveSimpleName("TransferService")
+            .should()
+            .dependOnClassesThat()
+            .haveSimpleName("AccountCreditService");
+    credits.check(classes);
+    ArchRule debits =
+        classes()
+            .that()
+            .haveSimpleName("TransferService")
+            .should()
+            .dependOnClassesThat()
+            .haveSimpleName("AccountDebitService");
+    debits.check(classes);
+  }
+
+  @Test
   void depositClassesMustNotDependOnWithdrawalClasses() {
     ArchRule rule =
         noClasses()
@@ -265,6 +285,18 @@ class ModuleBoundariesTest {
   }
 
   @Test
+  void financialOpsCoreMustNotDependOnTransferPackage() {
+    ArchRule rule =
+        noClasses()
+            .that()
+            .resideInAPackage("com.bancoelcapital.financialops.core..")
+            .should()
+            .dependOnClassesThat()
+            .resideInAPackage("com.bancoelcapital.financialops.transfer..");
+    rule.check(classes);
+  }
+
+  @Test
   void depositPackageMustNotDependOnWithdrawalPackage() {
     ArchRule rule =
         noClasses()
@@ -285,6 +317,54 @@ class ModuleBoundariesTest {
             .should()
             .dependOnClassesThat()
             .resideInAPackage("com.bancoelcapital.financialops.deposit..");
+    rule.check(classes);
+  }
+
+  @Test
+  void transferPackageMustNotDependOnDepositPackage() {
+    ArchRule rule =
+        noClasses()
+            .that()
+            .resideInAPackage("com.bancoelcapital.financialops.transfer..")
+            .should()
+            .dependOnClassesThat()
+            .resideInAPackage("com.bancoelcapital.financialops.deposit..");
+    rule.check(classes);
+  }
+
+  @Test
+  void depositPackageMustNotDependOnTransferPackage() {
+    ArchRule rule =
+        noClasses()
+            .that()
+            .resideInAPackage("com.bancoelcapital.financialops.deposit..")
+            .should()
+            .dependOnClassesThat()
+            .resideInAPackage("com.bancoelcapital.financialops.transfer..");
+    rule.check(classes);
+  }
+
+  @Test
+  void transferPackageMustNotDependOnWithdrawalPackage() {
+    ArchRule rule =
+        noClasses()
+            .that()
+            .resideInAPackage("com.bancoelcapital.financialops.transfer..")
+            .should()
+            .dependOnClassesThat()
+            .resideInAPackage("com.bancoelcapital.financialops.withdrawal..");
+    rule.check(classes);
+  }
+
+  @Test
+  void withdrawalPackageMustNotDependOnTransferPackage() {
+    ArchRule rule =
+        noClasses()
+            .that()
+            .resideInAPackage("com.bancoelcapital.financialops.withdrawal..")
+            .should()
+            .dependOnClassesThat()
+            .resideInAPackage("com.bancoelcapital.financialops.transfer..");
     rule.check(classes);
   }
 
@@ -409,6 +489,18 @@ class ModuleBoundariesTest {
   }
 
   @Test
+  void outsideTransferWebMustNotDependOnTransferWeb() {
+    ArchRule rule =
+        noClasses()
+            .that()
+            .resideOutsideOfPackage("com.bancoelcapital.financialops.transfer.web..")
+            .should()
+            .dependOnClassesThat()
+            .resideInAPackage("com.bancoelcapital.financialops.transfer.web..");
+    rule.check(classes);
+  }
+
+  @Test
   void financialOpsMustNotDependOnAccountsInternal() {
     ArchRule rule =
         noClasses()
@@ -453,6 +545,30 @@ class ModuleBoundariesTest {
             .should()
             .dependOnClassesThat()
             .resideInAPackage("com.bancoelcapital.financialops.deposit..");
+    rule.check(classes);
+  }
+
+  @Test
+  void transferWebMustNotDependOnDeposit() {
+    ArchRule rule =
+        noClasses()
+            .that()
+            .resideInAPackage("com.bancoelcapital.financialops.transfer.web..")
+            .should()
+            .dependOnClassesThat()
+            .resideInAPackage("com.bancoelcapital.financialops.deposit..");
+    rule.check(classes);
+  }
+
+  @Test
+  void transferWebMustNotDependOnWithdrawal() {
+    ArchRule rule =
+        noClasses()
+            .that()
+            .resideInAPackage("com.bancoelcapital.financialops.transfer.web..")
+            .should()
+            .dependOnClassesThat()
+            .resideInAPackage("com.bancoelcapital.financialops.withdrawal..");
     rule.check(classes);
   }
 
