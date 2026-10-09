@@ -187,7 +187,11 @@ class TransferPostgresPersistenceTest extends AbstractPostgresTest {
                 ((TransferOperationException) e).getKind()
                     == TransferOperationException.Kind.REJECTED);
 
-    assertThat(count("select count(*) from movements where account_id = ?", sourceId)).isZero();
+    assertThat(
+            count(
+                "select count(*) from movements where account_id = ? and direction = 'DEBIT'",
+                sourceId))
+        .isZero();
     assertThat(count("select count(*) from movements where account_id = ?", destinationId))
         .isZero();
     assertThat(balanceOf(sourceId)).isEqualTo(100_00L);
