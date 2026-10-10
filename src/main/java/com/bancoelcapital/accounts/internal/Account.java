@@ -102,4 +102,12 @@ public class Account {
   public boolean isOperable() {
     return status == AccountStatus.ACTIVE;
   }
+
+  /**
+   * Applies a lifecycle transition decided by TransitionRules (ADR-19). Only the Accounts-owned
+   * transition use case may change status; financial contracts only read it via isOperable.
+   */
+  public void applyStatus(AccountStatus status) {
+    this.status = status;
+  }
 }
