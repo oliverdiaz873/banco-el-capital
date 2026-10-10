@@ -20,6 +20,8 @@ import com.bancoelcapital.accounts.internal.TransitionException;
 import com.bancoelcapital.accounts.internal.TransitionResult;
 import com.bancoelcapital.customers.internal.CustomerCreationCommand;
 import com.bancoelcapital.customers.internal.CustomerCreationService;
+import com.bancoelcapital.financialops.deposit.DepositCommand;
+import com.bancoelcapital.financialops.deposit.DepositService;
 import com.bancoelcapital.identity.AuthenticatedActor;
 
 /**
@@ -30,6 +32,8 @@ import com.bancoelcapital.identity.AuthenticatedActor;
 class TransitionPostgresAuditTest extends AbstractPostgresTest {
 
   @Autowired AccountTransitionService transitions;
+
+  @Autowired DepositService deposits;
 
   @Autowired CustomerCreationService customers;
 
@@ -79,6 +83,8 @@ class TransitionPostgresAuditTest extends AbstractPostgresTest {
 
   @Test
   void rejectedTransitionAuditsRejectionOnly() {
+    // Funded account: CLOSE rejects on non-zero balance (an empty account would confirm).
+    deposits.deposit(new DepositCommand(accountId, 10_00L, "DOP"), "f-" + tag, employee);
     assertThatThrownBy(
             () ->
                 transitions.transition(
