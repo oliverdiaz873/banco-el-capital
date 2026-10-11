@@ -117,6 +117,80 @@ class ModuleBoundariesTest {
   }
 
   @Test
+  void beneficiariesMustNotDependOnAccountsInternal() {
+    ArchRule rule =
+        noClasses()
+            .that()
+            .resideInAPackage("com.bancoelcapital.beneficiaries..")
+            .should()
+            .dependOnClassesThat()
+            .resideInAPackage("com.bancoelcapital.accounts.internal..");
+    rule.check(classes);
+  }
+
+  @Test
+  void beneficiariesMustNotDependOnAccountsWeb() {
+    ArchRule rule =
+        noClasses()
+            .that()
+            .resideInAPackage("com.bancoelcapital.beneficiaries..")
+            .should()
+            .dependOnClassesThat()
+            .resideInAPackage("com.bancoelcapital.accounts.web..");
+    rule.check(classes);
+  }
+
+  @Test
+  void beneficiariesMustNotDependOnCustomers() {
+    ArchRule rule =
+        noClasses()
+            .that()
+            .resideInAPackage("com.bancoelcapital.beneficiaries..")
+            .should()
+            .dependOnClassesThat()
+            .resideInAPackage("com.bancoelcapital.customers..");
+    rule.check(classes);
+  }
+
+  @Test
+  void beneficiariesMustNotDependOnFinancialOps() {
+    ArchRule rule =
+        noClasses()
+            .that()
+            .resideInAPackage("com.bancoelcapital.beneficiaries..")
+            .should()
+            .dependOnClassesThat()
+            .resideInAPackage("com.bancoelcapital.financialops..");
+    rule.check(classes);
+  }
+
+  @Test
+  void financialOpsMustNotDependOnBeneficiaries() {
+    ArchRule rule =
+        noClasses()
+            .that()
+            .resideInAPackage("com.bancoelcapital.financialops..")
+            .should()
+            .dependOnClassesThat()
+            .resideInAPackage("com.bancoelcapital.beneficiaries..")
+            .allowEmptyShould(true);
+    rule.check(classes);
+  }
+
+  @Test
+  void accountsMustNotDependOnBeneficiaries() {
+    ArchRule rule =
+        noClasses()
+            .that()
+            .resideInAPackage("com.bancoelcapital.accounts..")
+            .should()
+            .dependOnClassesThat()
+            .resideInAPackage("com.bancoelcapital.beneficiaries..")
+            .allowEmptyShould(true);
+    rule.check(classes);
+  }
+
+  @Test
   void financialOpsMustNotDependOnAccountRepository() {
     ArchRule rule =
         noClasses()
@@ -634,6 +708,42 @@ class ModuleBoundariesTest {
             .dependOnClassesThat()
             .haveSimpleName("AuditEvent");
     audit.check(classes);
+  }
+
+  @Test
+  void outsideBeneficiariesMustNotDependOnBeneficiariesInternal() {
+    ArchRule rule =
+        noClasses()
+            .that()
+            .resideOutsideOfPackage("com.bancoelcapital.beneficiaries..")
+            .should()
+            .dependOnClassesThat()
+            .resideInAPackage("com.bancoelcapital.beneficiaries.internal..");
+    rule.check(classes);
+  }
+
+  @Test
+  void outsideBeneficiariesWebMustNotDependOnBeneficiariesWeb() {
+    ArchRule rule =
+        noClasses()
+            .that()
+            .resideOutsideOfPackage("com.bancoelcapital.beneficiaries.web..")
+            .should()
+            .dependOnClassesThat()
+            .resideInAPackage("com.bancoelcapital.beneficiaries.web..");
+    rule.check(classes);
+  }
+
+  @Test
+  void webMustNotDependOnBeneficiaryEntity() {
+    ArchRule rule =
+        noClasses()
+            .that()
+            .resideInAPackage("com.bancoelcapital..web..")
+            .should()
+            .dependOnClassesThat()
+            .haveSimpleName("Beneficiary");
+    rule.check(classes);
   }
 
   @Test

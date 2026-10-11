@@ -49,6 +49,12 @@ public class StubAuthorizationService implements AuthorizationService {
     return decide(actor, holderCustomerId);
   }
 
+  @Override
+  public AuthorizationDecision decideManageBeneficiary(
+      AuthenticatedActor actor, String ownerCustomerId) {
+    return decide(actor, ownerCustomerId);
+  }
+
   private AuthorizationDecision decide(AuthenticatedActor actor, String holderCustomerId) {
     if (actor == null || actor.subject() == null || actor.subject().isBlank()) {
       return AuthorizationDecision.deny("unauthenticated actor");

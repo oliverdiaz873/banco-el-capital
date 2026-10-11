@@ -68,6 +68,20 @@ class StubAuthorizationServiceTest {
   }
 
   @Test
+  void selfActorIsAllowedToManageOwnBeneficiaries() {
+    var actor = new AuthenticatedActor("owner-1", Set.of());
+
+    assertThat(service.decideManageBeneficiary(actor, "owner-1").allowed()).isTrue();
+  }
+
+  @Test
+  void otherCustomerIsDeniedBeneficiaryManagement() {
+    var other = new AuthenticatedActor("owner-2", Set.of());
+
+    assertThat(service.decideManageBeneficiary(other, "owner-1").allowed()).isFalse();
+  }
+
+  @Test
   void missingActorIsDeniedAsUnauthenticated() {
     for (AuthenticatedActor anonymous :
         new AuthenticatedActor[] {
