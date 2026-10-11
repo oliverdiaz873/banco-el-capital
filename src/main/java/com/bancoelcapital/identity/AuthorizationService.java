@@ -1,8 +1,8 @@
 package com.bancoelcapital.identity;
 
 /**
- * Decides whether an actor MAY request account, customer, deposit, withdrawal, transfer, or
- * lifecycle operations.
+ * Decides whether an actor MAY request account, customer, deposit, withdrawal, transfer, lifecycle,
+ * or beneficiary operations.
  */
 public interface AuthorizationService {
   AuthorizationDecision decideCreateAccount(AuthenticatedActor actor, String holderCustomerId);
@@ -18,4 +18,6 @@ public interface AuthorizationService {
   AuthorizationDecision decideTransition(AuthenticatedActor actor, String holderCustomerId);
 
   AuthorizationDecision decideViewAccount(AuthenticatedActor actor, String holderCustomerId);
+
+  AuthorizationDecision decideManageBeneficiary(AuthenticatedActor actor, String ownerCustomerId);
 }
