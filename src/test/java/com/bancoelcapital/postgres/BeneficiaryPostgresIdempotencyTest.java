@@ -45,11 +45,12 @@ class BeneficiaryPostgresIdempotencyTest extends AbstractPostgresTest {
   AuthenticatedActor ownerActor;
   AuthenticatedActor otherActor;
   String tag;
+  String owner;
 
   @BeforeEach
   void setup() {
     tag = UUID.randomUUID().toString().substring(0, 8);
-    String owner = "holder-pgben-own-" + tag;
+    owner = "holder-pgben-own-" + tag;
     String other = "holder-pgben-oth-" + tag;
     String destinationHolder = "holder-pgben-dst-" + tag;
     ownerActor = new AuthenticatedActor(owner, Set.of());
@@ -79,7 +80,7 @@ class BeneficiaryPostgresIdempotencyTest extends AbstractPostgresTest {
     assertThat(first.created()).isTrue();
     assertThat(replayed.created()).isFalse();
     assertThat(replayed.beneficiaryId()).isEqualTo(first.beneficiaryId());
-    assertThat(beneficiaryCount()).isEqualTo(1);
+    assertThat(beneficiaryCountForOwner()).isEqualTo(1);
     assertThat(
             count(
                 "select count(*) from audit_events where action = 'BENEFICIARY_CREATED' and"
@@ -99,7 +100,7 @@ class BeneficiaryPostgresIdempotencyTest extends AbstractPostgresTest {
         .isInstanceOf(BeneficiaryException.class)
         .matches(e -> ((BeneficiaryException) e).getKind() == BeneficiaryException.Kind.CONFLICT);
 
-    assertThat(beneficiaryCount()).isEqualTo(1);
+    assertThat(beneficiaryCountForOwner()).isEqualTo(1);
     assertThat(
             count(
                 "select count(*) from audit_events where action = 'BENEFICIARY_CONFLICT' and"
@@ -119,7 +120,7 @@ class BeneficiaryPostgresIdempotencyTest extends AbstractPostgresTest {
         .isInstanceOf(BeneficiaryException.class)
         .matches(e -> ((BeneficiaryException) e).getKind() == BeneficiaryException.Kind.REJECTED);
 
-    assertThat(beneficiaryCount()).isEqualTo(1);
+    assertThat(beneficiaryCountForOwner()).isEqualTo(1);
   }
 
   @Test
@@ -131,7 +132,7 @@ class BeneficiaryPostgresIdempotencyTest extends AbstractPostgresTest {
         .isInstanceOf(BeneficiaryException.class)
         .matches(e -> ((BeneficiaryException) e).getKind() == BeneficiaryException.Kind.REJECTED);
 
-    assertThat(beneficiaryCount()).isZero();
+    assertThat(beneficiaryCountForOwner()).isZero();
   }
 
   @Test
@@ -146,7 +147,7 @@ class BeneficiaryPostgresIdempotencyTest extends AbstractPostgresTest {
         beneficiaries.create(new BeneficiaryCommand(destinationId, "Bloqueada"), key, ownerActor);
 
     assertThat(result.created()).isTrue();
-    assertThat(beneficiaryCount()).isEqualTo(1);
+    assertThat(beneficiaryCountForOwner()).isEqualTo(1);
   }
 
   @Test
@@ -160,10 +161,10 @@ class BeneficiaryPostgresIdempotencyTest extends AbstractPostgresTest {
     assertThat(beneficiaries.listForOwner(otherActor)).isEmpty();
     assertThat(beneficiaries.listForOwner(ownerActor)).hasSize(1);
     assertThat(beneficiaries.remove(id, otherActor)).isFalse();
-    assertThat(beneficiaryCount()).isEqualTo(1);
+    assertThat(beneficiaryCountForOwner()).isEqualTo(1);
 
     assertThat(beneficiaries.remove(id, ownerActor)).isTrue();
-    assertThat(beneficiaryCount()).isZero();
+    assertThat(beneficiaryCountForOwner()).isZero();
     assertThat(beneficiaries.remove(id, ownerActor)).isFalse();
     assertThat(
             count(
@@ -173,8 +174,15 @@ class BeneficiaryPostgresIdempotencyTest extends AbstractPostgresTest {
         .isEqualTo(1);
   }
 
-  private int beneficiaryCount() {
-    Integer count = jdbc.queryForObject("select count(*) from beneficiaries", Integer.class);
+  /**
+   * Owner-scoped count: the PostgreSQL container is shared across tests, so a global count would
+   * accumulate rows from other tests. Each test uses a unique owner tag, keeping assertions
+   * isolated without cross-test cleanup.
+   */
+  private int beneficiaryCountForOwner() {
+    Integer count =
+        jdbc.queryForObject(
+            "select count(*) from beneficiaries where owner_customer_id = ?", Integer.class, owner);
     return count == null ? 0 : count;
   }
 
