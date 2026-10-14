@@ -79,6 +79,13 @@ needs a public Customers contract (cross-module identity needs are served throug
 `IdentityGateway` contract owned by Identity and implemented by `JpaIdentityGateway`). A public
 API MUST NOT be created only to keep visual symmetry with Accounts.
 
+## Beneficiaries
+`beneficiaries/api` is the public boundary of the module for transfer-time resolution only. It exposes exactly one read-only, owner-scoped resolution contract: given a beneficiary id and an owner, it returns the saved destination reference (destination account id, destination currency snapshot, alias snapshot). The exact signature is implementation detail within ADR-21 bounds. It MUST NOT expose repositories, JPA entities, holder data, balances, or account status.
+
+Everything else in Beneficiaries stays encapsulated in `beneficiaries/internal`, including the `Beneficiary` entity, repositories, creation details, idempotency records, and persistence implementation. `beneficiaries/web` remains the HTTP boundary of the feature: other modules MUST NOT depend on it.
+
+Allowed: `financialops.transfer -> beneficiaries.api` (resolution contract only; the single permitted exception to transfer/beneficiaries isolation, per ADR-01 and ADR-21). Prohibited: `financialops -> beneficiaries.internal`, `financialops -> beneficiaries.web`, `beneficiaries -> financialops.*`, and any `financialops` subfeature other than transfer depending on `beneficiaries.api`. No `beneficiaries.api` consumer beyond transfer is approved.
+
 ## Audit
 `audit.api` is the public boundary and contains:
 
@@ -214,9 +221,10 @@ These rules are not human conventions only. They are enforced at build time by
   `depositWebMustNotDependOnWithdrawal` / `withdrawalWebMustNotDependOnDeposit`.
 - Module APIs stay HTTP-free: `moduleApisMustNotDependOnWeb`.
 - Cycle freedom: `moduleSlicesAreFreeOfCycles`.
+- Beneficiaries (already enforced by `ModuleBoundariesTest`, recorded here to close the F6 documentation gap; test names are the definition, line ranges only auxiliary): `beneficiariesMustNotDependOnAccountsInternal`, `beneficiariesMustNotDependOnAccountsWeb`, `beneficiariesMustNotDependOnCustomers`, `beneficiariesMustNotDependOnFinancialOps`, `accountsMustNotDependOnBeneficiaries`, `outsideBeneficiariesMustNotDependOnBeneficiariesInternal`, `outsideBeneficiariesWebMustNotDependOnBeneficiariesWeb`, `webMustNotDependOnBeneficiaryEntity`, `financialOpsMustNotDependOnBeneficiariesInternal`, `financialOpsMustNotDependOnBeneficiariesWeb`, plus `financialOpsMustNotDependOnBeneficiaries` (currently passing vacuously via `allowEmptyShould`, since no such dependency exists yet).
+- Future rule (proposed, NOT yet implemented — implementation phase only, MUST NOT be presented as enforced): an affirmative rule verifying that `TransferService` uses the `beneficiaries.api` resolution contract (mirroring `transferServiceUsesAccountsContracts`). It will complement — never replace preemptively — the blanket rule: the blanket `financialOpsMustNotDependOnBeneficiaries` plus the already-enforced `internal`/`web` negatives MUST remain in force until the affirmative rule is implemented and verified. Sequence: (1) design the affirmative contract-use rule; (2) implement and run the architecture tests; (3) complement — never weaken — the existing negatives; the blanket rule MUST NOT be removed or weakened until the affirmative rule effectively protects the intended boundary.
 
-No new ArchUnit rules are introduced by this documentation phase; the text above was adjusted to
-the implemented rules.
+No new ArchUnit rule beyond the already-implemented negatives is introduced by this documentation phase; the beneficiary rules above are recorded from the already-implemented test, and the affirmative rule is a proposal only.
 
 ## Relation to ADR-14
 ADR-14 is NOT modified. This ADR is compatible with the incremental evolution defined there.

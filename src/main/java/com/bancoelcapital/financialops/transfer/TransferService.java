@@ -312,7 +312,15 @@ public class TransferService {
             command.currency()));
     idempotency.save(
         new TransferOperationIdempotency(
-            idempotencyKey, operationId, hash, TransferOperationOutcome.CONFIRMED));
+            idempotencyKey,
+            operationId,
+            hash,
+            TransferOperationOutcome.CONFIRMED,
+            command.sourceAccountId(),
+            null,
+            "direct",
+            command.amountMinorUnits(),
+            command.currency()));
     audit.record(
         new AuditEntry(
             actorSubject(actor),
@@ -353,7 +361,15 @@ public class TransferService {
             FinancialOperationStatus.REJECTED));
     idempotency.save(
         new TransferOperationIdempotency(
-            idempotencyKey, operationId, hash, TransferOperationOutcome.REJECTED));
+            idempotencyKey,
+            operationId,
+            hash,
+            TransferOperationOutcome.REJECTED,
+            command.sourceAccountId(),
+            null,
+            "direct",
+            command.amountMinorUnits(),
+            command.currency()));
     audit.record(
         new AuditEntry(
             actorSubject(actor),

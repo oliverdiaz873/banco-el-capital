@@ -66,7 +66,15 @@ class TransferFoundationPersistenceTest {
             creditMovementId, operationId, destinationId, MovementDirection.CREDIT, 25_00L, "DOP"));
     entities.persist(
         new TransferOperationIdempotency(
-            "t1", operationId, "hash", TransferOperationOutcome.CONFIRMED));
+            "t1",
+            operationId,
+            "hash",
+            TransferOperationOutcome.CONFIRMED,
+            sourceId,
+            null,
+            "direct",
+            25_00L,
+            "DOP"));
     entities.flush();
     entities.clear();
 
@@ -118,7 +126,15 @@ class TransferFoundationPersistenceTest {
             "shared-key", depositOperationId, "hash", DepositOperationOutcome.CONFIRMED));
     entities.persist(
         new TransferOperationIdempotency(
-            "shared-key", transferOperationId, "hash", TransferOperationOutcome.CONFIRMED));
+            "shared-key",
+            transferOperationId,
+            "hash",
+            TransferOperationOutcome.CONFIRMED,
+            sourceId,
+            null,
+            "direct",
+            4_00L,
+            "DOP"));
     entities.flush();
     entities.clear();
 
@@ -130,13 +146,29 @@ class TransferFoundationPersistenceTest {
   void duplicateTransferIdempotencyKeyViolatesConstraint() {
     entities.persist(
         new TransferOperationIdempotency(
-            "t-dup", UUID.randomUUID(), "h", TransferOperationOutcome.CONFIRMED));
+            "t-dup",
+            UUID.randomUUID(),
+            "h",
+            TransferOperationOutcome.CONFIRMED,
+            UUID.randomUUID(),
+            null,
+            "direct",
+            1L,
+            "DOP"));
     entities.flush();
     entities.clear();
 
     entities.persist(
         new TransferOperationIdempotency(
-            "t-dup", UUID.randomUUID(), "h", TransferOperationOutcome.CONFIRMED));
+            "t-dup",
+            UUID.randomUUID(),
+            "h",
+            TransferOperationOutcome.CONFIRMED,
+            UUID.randomUUID(),
+            null,
+            "direct",
+            1L,
+            "DOP"));
     assertThatThrownBy(entities::flush).isInstanceOf(PersistenceException.class);
   }
 }

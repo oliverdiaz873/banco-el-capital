@@ -127,6 +127,47 @@ class TransferServiceTest {
   }
 
   @Test
+  void confirmsPersistsCompleteDirectIntent() {
+    authorizedValidSetup();
+    appliedLegs();
+
+    TransferResult result = service.transfer(command, "k1", actor);
+
+    var stored = ArgumentCaptor.forClass(TransferOperationIdempotency.class);
+    verify(idempotency).save(stored.capture());
+    assertThat(stored.getValue().getOperationId()).isEqualTo(result.operationId());
+    assertThat(stored.getValue().getOutcome()).isEqualTo(TransferOperationOutcome.CONFIRMED);
+    assertThat(stored.getValue().getSourceAccountId()).isEqualTo(sourceId);
+    assertThat(stored.getValue().getBeneficiaryId()).isNull();
+    assertThat(stored.getValue().getPath()).isEqualTo("direct");
+    assertThat(stored.getValue().getAmountMinorUnits()).isEqualTo(10_00L);
+    assertThat(stored.getValue().getCurrency()).isEqualTo("DOP");
+  }
+
+  @Test
+  void rejectsUnknownDestinationWithDirectIntent() {
+    when(lookup.findHolderCustomerId(sourceId)).thenReturn(Optional.of("holder-source"));
+    when(lookup.findHolderCustomerId(destinationId)).thenReturn(Optional.empty());
+
+    assertThatThrownBy(() -> service.transfer(command, "k1", actor))
+        .isInstanceOf(TransferOperationException.class)
+        .matches(
+            e ->
+                ((TransferOperationException) e).getKind()
+                    == TransferOperationException.Kind.REJECTED);
+
+    var stored = ArgumentCaptor.forClass(TransferOperationIdempotency.class);
+    verify(idempotency).save(stored.capture());
+    assertThat(stored.getValue().getOutcome()).isEqualTo(TransferOperationOutcome.REJECTED);
+    assertThat(stored.getValue().getSourceAccountId()).isEqualTo(sourceId);
+    assertThat(stored.getValue().getBeneficiaryId()).isNull();
+    assertThat(stored.getValue().getPath()).isEqualTo("direct");
+    assertThat(stored.getValue().getAmountMinorUnits()).isEqualTo(10_00L);
+    assertThat(stored.getValue().getCurrency()).isEqualTo("DOP");
+    verify(movements, never()).save(any());
+  }
+
+  @Test
   void locksLegsInUuidAscendingOrderSourceFirst() {
     authorizedValidSetup();
     appliedLegs();
@@ -248,7 +289,16 @@ class TransferServiceTest {
         .thenReturn(AuthorizationDecision.allow());
     // Pre-check sees nothing; the second-leg re-check finds the committed winner.
     var winner =
-        new TransferOperationIdempotency("k1", winnerId, hash, TransferOperationOutcome.CONFIRMED);
+        new TransferOperationIdempotency(
+            "k1",
+            winnerId,
+            hash,
+            TransferOperationOutcome.CONFIRMED,
+            sourceId,
+            null,
+            "direct",
+            10_00L,
+            "DOP");
     when(idempotency.findById("k1")).thenReturn(Optional.empty(), Optional.of(winner));
     when(debits.applyDebit(any(AccountDebitCommand.class)))
         .thenReturn(new AccountDebitResult(AccountDebitResult.AccountDebitOutcome.APPLIED, 90_00L));
@@ -272,7 +322,15 @@ class TransferServiceTest {
         .thenReturn(AuthorizationDecision.allow());
     var winner =
         new TransferOperationIdempotency(
-            "k1", UUID.randomUUID(), "other-hash", TransferOperationOutcome.CONFIRMED);
+            "k1",
+            UUID.randomUUID(),
+            "other-hash",
+            TransferOperationOutcome.CONFIRMED,
+            sourceId,
+            null,
+            "direct",
+            10_00L,
+            "DOP");
     when(idempotency.findById("k1")).thenReturn(Optional.empty(), Optional.of(winner));
     when(debits.applyDebit(any(AccountDebitCommand.class)))
         .thenReturn(new AccountDebitResult(AccountDebitResult.AccountDebitOutcome.APPLIED, 90_00L));
@@ -303,7 +361,16 @@ class TransferServiceTest {
     // Pre-check and second-leg re-check see nothing; the fresh rejection insert then collides
     // because a same-key winner committed in between; the reload finds it.
     var winner =
-        new TransferOperationIdempotency("k1", winnerId, hash, TransferOperationOutcome.CONFIRMED);
+        new TransferOperationIdempotency(
+            "k1",
+            winnerId,
+            hash,
+            TransferOperationOutcome.CONFIRMED,
+            sourceId,
+            null,
+            "direct",
+            10_00L,
+            "DOP");
     when(idempotency.findById("k1"))
         .thenReturn(Optional.empty(), Optional.empty(), Optional.of(winner));
     when(debits.applyDebit(any(AccountDebitCommand.class)))
@@ -331,7 +398,15 @@ class TransferServiceTest {
         .thenReturn(AuthorizationDecision.allow());
     var winner =
         new TransferOperationIdempotency(
-            "k1", UUID.randomUUID(), "other-hash", TransferOperationOutcome.CONFIRMED);
+            "k1",
+            UUID.randomUUID(),
+            "other-hash",
+            TransferOperationOutcome.CONFIRMED,
+            sourceId,
+            null,
+            "direct",
+            10_00L,
+            "DOP");
     when(idempotency.findById("k1"))
         .thenReturn(Optional.empty(), Optional.empty(), Optional.of(winner));
     when(debits.applyDebit(any(AccountDebitCommand.class)))
@@ -405,7 +480,15 @@ class TransferServiceTest {
         .thenReturn(
             Optional.of(
                 new TransferOperationIdempotency(
-                    "k1", operationId, hash, TransferOperationOutcome.CONFIRMED)));
+                    "k1",
+                    operationId,
+                    hash,
+                    TransferOperationOutcome.CONFIRMED,
+                    sourceId,
+                    null,
+                    "direct",
+                    10_00L,
+                    "DOP")));
 
     TransferResult result = service.transfer(command, "k1", actor);
 
@@ -428,7 +511,15 @@ class TransferServiceTest {
         .thenReturn(
             Optional.of(
                 new TransferOperationIdempotency(
-                    "k1", UUID.randomUUID(), "other-hash", TransferOperationOutcome.CONFIRMED)));
+                    "k1",
+                    UUID.randomUUID(),
+                    "other-hash",
+                    TransferOperationOutcome.CONFIRMED,
+                    sourceId,
+                    null,
+                    "direct",
+                    10_00L,
+                    "DOP")));
 
     assertThatThrownBy(() -> service.transfer(command, "k1", actor))
         .isInstanceOf(TransferOperationException.class)
@@ -469,7 +560,15 @@ class TransferServiceTest {
             Optional.empty(),
             Optional.of(
                 new TransferOperationIdempotency(
-                    "k1", winnerId, hash, TransferOperationOutcome.CONFIRMED)));
+                    "k1",
+                    winnerId,
+                    hash,
+                    TransferOperationOutcome.CONFIRMED,
+                    sourceId,
+                    null,
+                    "direct",
+                    10_00L,
+                    "DOP")));
     appliedLegs();
 
     TransferResult replayed = service.transfer(command, "k1", actor);
@@ -529,7 +628,15 @@ class TransferServiceTest {
         .thenReturn(
             Optional.of(
                 new TransferOperationIdempotency(
-                    "k1", operationId, hash, TransferOperationOutcome.CONFIRMED)));
+                    "k1",
+                    operationId,
+                    hash,
+                    TransferOperationOutcome.CONFIRMED,
+                    sourceId,
+                    null,
+                    "direct",
+                    10_00L,
+                    "DOP")));
     when(operations.findById(operationId)).thenReturn(Optional.of(operation));
     when(lookup.findHolderCustomerId(sourceId)).thenReturn(Optional.of("holder-source"));
     when(authorization.decideTransfer(actor, "holder-source"))
@@ -557,7 +664,15 @@ class TransferServiceTest {
         .thenReturn(
             Optional.of(
                 new TransferOperationIdempotency(
-                    "k1", operationId, hash, TransferOperationOutcome.CONFIRMED)));
+                    "k1",
+                    operationId,
+                    hash,
+                    TransferOperationOutcome.CONFIRMED,
+                    sourceId,
+                    null,
+                    "direct",
+                    10_00L,
+                    "DOP")));
 
     assertThat(service.findAuthorizedByKey("k1", "other-hash", actor)).isEmpty();
   }
@@ -580,7 +695,15 @@ class TransferServiceTest {
         .thenReturn(
             Optional.of(
                 new TransferOperationIdempotency(
-                    "k1", operationId, hash, TransferOperationOutcome.CONFIRMED)));
+                    "k1",
+                    operationId,
+                    hash,
+                    TransferOperationOutcome.CONFIRMED,
+                    sourceId,
+                    null,
+                    "direct",
+                    10_00L,
+                    "DOP")));
     when(operations.findById(operationId)).thenReturn(Optional.of(operation));
     when(lookup.findHolderCustomerId(sourceId)).thenReturn(Optional.of("holder-source"));
     when(authorization.decideTransfer(destinationActor, "holder-source"))

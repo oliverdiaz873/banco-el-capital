@@ -178,6 +178,30 @@ class ModuleBoundariesTest {
   }
 
   @Test
+  void financialOpsMustNotDependOnBeneficiariesInternal() {
+    ArchRule rule =
+        noClasses()
+            .that()
+            .resideInAPackage("com.bancoelcapital.financialops..")
+            .should()
+            .dependOnClassesThat()
+            .resideInAPackage("com.bancoelcapital.beneficiaries.internal..");
+    rule.check(classes);
+  }
+
+  @Test
+  void financialOpsMustNotDependOnBeneficiariesWeb() {
+    ArchRule rule =
+        noClasses()
+            .that()
+            .resideInAPackage("com.bancoelcapital.financialops..")
+            .should()
+            .dependOnClassesThat()
+            .resideInAPackage("com.bancoelcapital.beneficiaries.web..");
+    rule.check(classes);
+  }
+
+  @Test
   void accountsMustNotDependOnBeneficiaries() {
     ArchRule rule =
         noClasses()
