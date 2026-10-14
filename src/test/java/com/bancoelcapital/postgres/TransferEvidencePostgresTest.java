@@ -18,6 +18,9 @@ import com.bancoelcapital.accounts.internal.AccountCreationCommand;
 import com.bancoelcapital.accounts.internal.AccountCreationService;
 import com.bancoelcapital.customers.internal.CustomerCreationCommand;
 import com.bancoelcapital.customers.internal.CustomerCreationService;
+import com.bancoelcapital.financialops.core.FinancialOperation;
+import com.bancoelcapital.financialops.core.FinancialOperationStatus;
+import com.bancoelcapital.financialops.core.FinancialOperationType;
 import com.bancoelcapital.financialops.deposit.DepositCommand;
 import com.bancoelcapital.financialops.deposit.DepositService;
 import com.bancoelcapital.financialops.transfer.TransferBeneficiaryUsage;
@@ -104,6 +107,18 @@ class TransferEvidencePostgresTest extends AbstractPostgresTest {
   void completeRowsPersistOnPostgres() {
     UUID operation = UUID.randomUUID();
     UUID beneficiary = UUID.randomUUID();
+    // transfer_operation_idempotency.operation_id REFERENCES financial_operations(id) in the
+    // Flyway-managed schema (V8): persist the referenced operation first, mirroring the
+    // production write order. account_id stays a logical reference (no FK to accounts).
+    entities.persist(
+        new FinancialOperation(
+            operation,
+            FinancialOperationType.TRANSFER,
+            "postgres-test",
+            UUID.randomUUID(),
+            100L,
+            "DOP",
+            FinancialOperationStatus.CONFIRMED));
     entities.persist(
         new TransferOperationIdempotency(
             "k-pg-benef",
