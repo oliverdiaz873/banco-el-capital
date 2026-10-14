@@ -88,8 +88,11 @@ Allowed:
 - Financial Operations -> Accounts
 - Financial Operations -> Identity / Customers
 - Financial Operations -> Audit / Trace
+- Financial Operations -> Beneficiaries.api (transfer-time owner-scoped read-only resolution only, via the public contract, inside the transfer local transaction; no direct state, database, or mutation access)
 - Beneficiaries -> Customers
 - Beneficiaries -> Accounts for necessary resolution / query
+
+Scope clarification (binding): this edge grants no access to Beneficiaries repositories, internal entities, or tables, and no write or management capability. Financial Operations retains ownership of the local financial transaction; Beneficiaries retains ownership of resolution. Every other Financial Operations -> Beneficiaries edge (internal, web, persistence, write, management) remains prohibited under the unchanged Prohibited rules below.
 
 Prohibited:
 - Accounts -> Financial Operations to delegate financial logic;

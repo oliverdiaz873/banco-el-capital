@@ -121,6 +121,10 @@ Source Balance State + Destination Balance State
   (`actor == source holder`) or `BANK_EMPLOYEE` under the current stub. Both
   holders are server-resolved; the request carries no holder identity.
 
+### Prospective addendum - beneficiary validation point (Phase 4 proposal, NOT implemented, NOT normative for Phases 1-3)
+
+The following is a Phase 4 proposal under ADR-21 direction; it requires separate approval, implementation and PostgreSQL barrier proof before becoming normative. A beneficiary-path transfer WOULD resolve the beneficiary owner-scoped on outer-writeTx entry and WOULD re-validate owner-scoped existence after both account row locks are held, adjacent to the existing post-lock idempotency re-check. The second read WOULD be the validation point, NOT a mutual-exclusion mechanism: no beneficiary row lock WOULD be taken in this increment. The confirmation decision WOULD still be taken only after BOTH applyDebit/applyCredit results are known, invoked in UUID ascending order of the RESOLVED pair (call order IS lock order, unchanged). The post-lock re-check WOULD extend to the path-discriminated intent hash. The validation point WOULD REQUIRE PostgreSQL READ COMMITTED statement-snapshot semantics (a delete committed before the second read MUST be visible there); "READ COMMITTED or stronger" SHALL NOT be used. No configuration, annotation, test or production-code change is introduced by this paragraph. No change to: Option A representation, no-overdraft, exact-balance, same-account rejection, single-currency, ACTIVE->ACTIVE transfer scope, one-writeTx atomicity, flush-before-decision, winner-reload-in-fresh-readTx, UNKNOWN/FAILED meanings, source-only base authorization (extended only by the ADR-21 dual-auth rule, itself prospective).
+
 ## Atomicity
 
 A confirmed transfer MUST atomically coordinate, within one single outer local
