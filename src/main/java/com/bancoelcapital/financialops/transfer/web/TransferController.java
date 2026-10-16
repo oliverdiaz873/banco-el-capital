@@ -47,6 +47,7 @@ public class TransferController {
             new TransferCommand(
                 body.sourceAccountId(),
                 body.destinationAccountId(),
+                body.beneficiaryId(),
                 body.amountMinorUnits(),
                 body.currency()),
             idempotencyKey,

@@ -36,6 +36,7 @@ import com.bancoelcapital.accounts.api.AccountDebitService;
 import com.bancoelcapital.accounts.api.AccountLookupService;
 import com.bancoelcapital.audit.api.AuditEntry;
 import com.bancoelcapital.audit.api.AuditRecorder;
+import com.bancoelcapital.beneficiaries.api.BeneficiaryResolver;
 import com.bancoelcapital.financialops.core.FinancialOperation;
 import com.bancoelcapital.financialops.core.FinancialOperationRepository;
 import com.bancoelcapital.financialops.core.FinancialOperationStatus;
@@ -57,6 +58,8 @@ class TransferServiceTest {
   @Mock AccountDebitService debits;
   @Mock AuthorizationService authorization;
   @Mock AuditRecorder audit;
+  @Mock BeneficiaryResolver beneficiaries;
+  @Mock TransferBeneficiaryUsageRepository usage;
   @Mock PlatformTransactionManager transactionManager;
 
   TransferService service;
@@ -82,6 +85,8 @@ class TransferServiceTest {
             debits,
             authorization,
             audit,
+            beneficiaries,
+            usage,
             transactionManager);
   }
 

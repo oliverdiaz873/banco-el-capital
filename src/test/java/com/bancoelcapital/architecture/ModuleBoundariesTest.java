@@ -166,14 +166,53 @@ class ModuleBoundariesTest {
 
   @Test
   void financialOpsMustNotDependOnBeneficiaries() {
+    // Narrowed per E2: every Financial Operations package except transfer keeps the blanket ban.
+    // Transfer itself is governed by transferUsesBeneficiariesApiResolution plus the strict
+    // internal/web negatives below.
     ArchRule rule =
         noClasses()
             .that()
             .resideInAPackage("com.bancoelcapital.financialops..")
+            .and()
+            .resideOutsideOfPackage("com.bancoelcapital.financialops.transfer..")
             .should()
             .dependOnClassesThat()
             .resideInAPackage("com.bancoelcapital.beneficiaries..")
             .allowEmptyShould(true);
+    rule.check(classes);
+  }
+
+  @Test
+  void transferUsesBeneficiariesApiResolution() {
+    ArchRule resolver =
+        classes()
+            .that()
+            .haveSimpleName("TransferService")
+            .should()
+            .dependOnClassesThat()
+            .haveSimpleName("BeneficiaryResolver");
+    resolver.check(classes);
+    ArchRule resolution =
+        classes()
+            .that()
+            .haveSimpleName("TransferService")
+            .should()
+            .dependOnClassesThat()
+            .haveSimpleName("BeneficiaryResolution");
+    resolution.check(classes);
+  }
+
+  @Test
+  void financialOpsOutsideTransferMustNotDependOnBeneficiaries() {
+    ArchRule rule =
+        noClasses()
+            .that()
+            .resideInAPackage("com.bancoelcapital.financialops..")
+            .and()
+            .resideOutsideOfPackage("com.bancoelcapital.financialops.transfer..")
+            .should()
+            .dependOnClassesThat()
+            .resideInAPackage("com.bancoelcapital.beneficiaries..");
     rule.check(classes);
   }
 
