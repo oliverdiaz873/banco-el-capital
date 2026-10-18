@@ -134,5 +134,75 @@ threads; rejection or replacement of malicious and malformed incoming correlatio
 absence of sensitive data in logs; the set of exposed management endpoints; and the existing
 ArchUnit rules remain green and unchanged.
 
+## Implementation status and audit record (2026-10-18)
+
+This record registers what was implemented and verified, and nothing more. It does not widen the
+binding scope above, and it keeps three different states apart: architectural acceptance (this ADR),
+verified implementation (below, according to the cited evidence), and integration into the main
+branch, which has NOT happened - the work remains uncommitted in an isolated clone and is not part
+of `main`. It also clarifies, without rewriting it, that the "Acceptance record" statement above
+("it is not evidence that any observability component exists") describes the acceptance date:
+implementation was authorized afterwards, phase by phase, and is reported here.
+
+Implemented in the application wiring package (`com.bancoelcapital.app`), as the only production
+change of this increment:
+- `CorrelationIds` (identifier contract), `CorrelationIdFilter` (diagnostic HTTP correlation) and
+  `ObservabilityConfig` (single `FilterRegistrationBean` registration, no stereotype annotation on
+  the filter).
+- `spring-boot-starter-actuator` as the only added dependency, together with
+  `management.endpoints.web.exposure.include: health` and
+  `management.endpoint.health.show-details: never`, changed atomically with that dependency so the
+  pre-existing `info` entry never became effective.
+- Apart from the documentation of this ADR, no production, configuration, migration or workflow file
+  was modified.
+
+Evidence cited (30 new tests in that package; 449 tests run, 0 failures, 0 errors, 0 skipped, with
+Spotless and Checkstyle clean; the run excludes the PostgreSQL-tagged tests, which need Docker):
+- `CorrelationIdsTest` (8) and `CorrelationIdFilterTest` (8): identifier bound, replacement of
+  malformed and hostile values, HTTP echo, diagnostic-context cleanup including a failing record, and
+  the logging allow-list with sentinel values.
+- `ObservabilityConfigTest` (3), `ActuatorExposureTest` (5) and
+  `ActuatorExposureUnderTestProfileTest` (6): real HTTP (`@SpringBootTest(webEnvironment =
+  RANDOM_PORT)`) for single registration, order, HTTP correlation on management routes, and the
+  exposed management endpoint set, the last class under the `test` profile.
+- `ModuleBoundariesTest` (65) and `SmokeTest` (1) remain green with no ArchUnit rule added or
+  changed.
+
+Interpretations accepted by review, recorded as interpretations and not as implicit approvals:
+- The `operationId` field of the diagnostic record is NOT emitted. The conditional "where already
+  available and permitted" is not met at the HTTP boundary: the identifier is created inside the
+  financial services and the HTTP layer MUST NOT invent an operation or assert that a request
+  corresponds to a confirmed one, so propagating it would be a separate design decision.
+- Correlation propagation across layers is satisfied as a mechanism only: the identifiers live in
+  the diagnostic context for the whole request thread and the `correlationId` is echoed to the
+  client, but no component outside the filter consumes them yet, because logging inside the financial
+  modules remains out of scope.
+
+Declared implementation limits (documented, not new scope):
+- Only the initial `REQUEST` dispatch is recorded: `ERROR`, `ASYNC`, `FORWARD` and `INCLUDE`
+  dispatches are skipped deliberately, so asynchronous request processing is not covered.
+- When an exception escapes the filter, the recorded status is the value observed at that point; the
+  final status is decided by the container afterwards, and this record does not claim to capture it.
+- Errors (as opposed to exceptions) are not classified by type; they propagate with
+  `exceptionType=none`.
+- The route template is whatever Spring MVC actually selected: `unmatched` when no handler matched,
+  and the matched pattern otherwise. A 404 served by the static resource handler therefore reports
+  the resource pattern, which is truthful for diagnosis and is not the requested path.
+- The filter order (`Ordered.HIGHEST_PRECEDENCE`) is an implementation decision of this increment,
+  pinned by a test, and not a literal requirement of this ADR.
+- No further instrumentation was added. A read-only runtime probe of the framework's default
+  instrumentation observed 62 technical meters (HTTP server and JVM, plus the pre-existing
+  datasource pool) collected internally, with no HTTP exposure of metrics.
+
+Evidence limitation that MUST NOT be read away: the HTTP evidence was produced over H2. This
+increment has NOT been validated against PostgreSQL, so this record is not evidence of application
+start-up, health or exposure behaviour on PostgreSQL, nor of the real health of any business
+component.
+
+Pending, unchanged by this record: the interpretations above stand until a separate decision
+resolves them; identity (the `X-Actor-Id` spoofing risk) remains an open, separate security decision;
+and integration into the main branch, together with any derived correction, requires separate
+authorization.
+
 ## Notes
 - Compatible with ADR-01 boundaries, ADR-04 FAILED/recovery, ADR-06 determinism, ADR-07 concurrency, ADR-08 durable persistence, and ADR-11 audit separation at creation time. Tooling is concretized in the Acceptance Supplement; SLOs remain OPEN.
