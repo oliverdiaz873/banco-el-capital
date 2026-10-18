@@ -810,6 +810,54 @@ class ModuleBoundariesTest {
   }
 
   @Test
+  void movementHistoryMustNotDependOnOtherModulesInternalsOrWeb() {
+    ArchRule rule =
+        noClasses()
+            .that()
+            .resideInAPackage("com.bancoelcapital.financialops.history..")
+            .should()
+            .dependOnClassesThat()
+            .resideInAnyPackage(
+                "com.bancoelcapital.accounts.internal..",
+                "com.bancoelcapital.accounts.web..",
+                "com.bancoelcapital.customers..",
+                "com.bancoelcapital.beneficiaries..");
+    rule.check(classes);
+  }
+
+  @Test
+  void movementHistoryWebMustNotDependOnRepositories() {
+    ArchRule rule =
+        noClasses()
+            .that()
+            .resideInAPackage("com.bancoelcapital.financialops.history.web..")
+            .should()
+            .dependOnClassesThat()
+            .haveSimpleNameEndingWith("Repository");
+    rule.check(classes);
+  }
+
+  @Test
+  void movementHistoryWebMustNotDependOnFinancialEntities() {
+    ArchRule movement =
+        noClasses()
+            .that()
+            .resideInAPackage("com.bancoelcapital.financialops.history.web..")
+            .should()
+            .dependOnClassesThat()
+            .haveSimpleName("Movement");
+    movement.check(classes);
+    ArchRule operation =
+        noClasses()
+            .that()
+            .resideInAPackage("com.bancoelcapital.financialops.history.web..")
+            .should()
+            .dependOnClassesThat()
+            .haveSimpleName("FinancialOperation");
+    operation.check(classes);
+  }
+
+  @Test
   void moduleSlicesAreFreeOfCycles() {
     ArchRule rule = slices().matching("com.bancoelcapital.(*)..").should().beFreeOfCycles();
     rule.check(classes);
