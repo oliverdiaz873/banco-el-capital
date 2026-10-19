@@ -139,8 +139,9 @@ ArchUnit rules remain green and unchanged.
 This record registers what was implemented and verified, and nothing more. It does not widen the
 binding scope above, and it keeps three different states apart: architectural acceptance (this ADR),
 verified implementation (below, according to the cited evidence), and integration into the main
-branch, which has NOT happened - the work remains uncommitted in an isolated clone and is not part
-of `main`. It also clarifies, without rewriting it, that the "Acceptance record" statement above
+branch, which has NOT happened: the work is committed on `docs/account-movement-history-closure`
+(`eb22acc`, `53988ec`, `9bbc7bb`), published in PR #14, and is not part of `main`. It also
+clarifies, without rewriting it, that the "Acceptance record" statement above
 ("it is not evidence that any observability component exists") describes the acceptance date:
 implementation was authorized afterwards, phase by phase, and is reported here.
 
@@ -194,10 +195,11 @@ Declared implementation limits (documented, not new scope):
   instrumentation observed 62 technical meters (HTTP server and JVM, plus the pre-existing
   datasource pool) collected internally, with no HTTP exposure of metrics.
 
-Evidence limitation that MUST NOT be read away: the HTTP evidence was produced over H2. This
-increment has NOT been validated against PostgreSQL, so this record is not evidence of application
-start-up, health or exposure behaviour on PostgreSQL, nor of the real health of any business
-component.
+Evidence limitation that MUST NOT be read away: the local HTTP evidence was produced over H2. The
+increment has NOT been validated against PostgreSQL locally. It WAS validated against PostgreSQL in
+CI on `9bbc7bb`: 80 PostgreSQL tests ran with 0 failures, 0 errors and 0 skipped, and the anti-skip
+gate passed. That CI run is evidence for the PostgreSQL test suite; it is not a local observation
+and does not by itself extend the H2-based health and exposure evidence above to PostgreSQL.
 
 Pending, unchanged by this record: the interpretations above stand until a separate decision
 resolves them; identity (the `X-Actor-Id` spoofing risk) remains an open, separate security decision;
