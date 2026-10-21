@@ -29,7 +29,8 @@ import jakarta.persistence.PersistenceContext;
  * P0.2: rejection identity persistence through the real TransferService on H2. A direct rejection
  * persists direct intent with a null beneficiary; a beneficiary-mode rejection persists the
  * beneficiary path with the supplied beneficiary id and the beneficiary-specific request hash.
- * Neither creates movements. Retrying the same beneficiary key replays the stored rejection.
+ * Neither creates movements. Retrying the same key on either path replays the stored rejection
+ * without replacing its operation identity.
  */
 @SpringBootTest(
     properties = {
@@ -207,10 +208,10 @@ class TransferRejectionIdentityPersistenceTest {
 
   @Test
   void beneficiaryRejectionRetryReplaysStoredRejection() {
-    // P1a ordering: the existing-key check runs before beneficiary resolution, so a retry with
-    // the same key and payload replays the stored rejection without consulting the live
-    // beneficiary table and without writing anything new. Direct unknown-destination retries keep
-    // their pre-existing fresh-rejection behavior (see directRejectionRetry... below).
+    // The existing-key check runs before beneficiary resolution and before every deterministic
+    // rejection, so a retry with the same key and payload replays the stored rejection without
+    // consulting the live beneficiary table and without writing anything new. The direct-path
+    // retry below proves the same ordering.
     UUID beneficiaryId = UUID.randomUUID();
     TransferCommand command = new TransferCommand(sourceId, null, beneficiaryId, 40_00L, "DOP");
     assertThatThrownBy(() -> transfers.transfer(command, "tri-replay", sourceActor))
@@ -235,11 +236,10 @@ class TransferRejectionIdentityPersistenceTest {
   }
 
   @Test
-  void directRejectionRetryCreatesFreshRejectionWithoutNewEffects() {
-    // Pre-existing direct semantics, preserved exactly by P0.2 and P1a: the destination lookup
-    // runs before the existing-key fast path, so every retry persists a fresh rejection that
-    // merge-updates the row (new operation, +1 audit), with zero movements. Beneficiary retries
-    // instead replay (existing-key check precedes resolution); see the test above.
+  void directRejectionRetryReplaysStoredRejectionAndPreservesOriginalIdentity() {
+    // The existing-key lookup precedes every deterministic rejection on both paths. A direct
+    // rejection retry therefore replays the stored result instead of persist()+merge-updating the
+    // row with a new operation and another rejection audit.
     TransferCommand command = new TransferCommand(sourceId, UUID.randomUUID(), 40_00L, "DOP");
     assertThatThrownBy(() -> transfers.transfer(command, "tri-direct-retry", sourceActor))
         .isInstanceOf(TransferOperationException.class);
@@ -253,15 +253,82 @@ class TransferRejectionIdentityPersistenceTest {
                     == TransferOperationException.Kind.REJECTED);
 
     Map<String, Object> after = intentRow("tri-direct-retry");
+    assertThat(after).isEqualTo(before);
     assertThat(after.get("outcome")).isEqualTo("REJECTED");
     assertThat(after.get("beneficiary_id")).isNull();
     assertThat(after.get("path")).isEqualTo("direct");
     assertThat(after.get("request_hash")).isEqualTo(TransferService.requestHash(command));
-    assertThat(after.get("operation_id")).isNotEqualTo(before.get("operation_id"));
-    assertThat(operationMovements(before.get("operation_id"))).isZero();
     assertThat(operationMovements(after.get("operation_id"))).isZero();
     assertThat(balanceOf(sourceId)).isEqualTo(100_00L);
-    assertThat(rejectionAudits("tri-direct-retry")).isEqualTo(2);
+    assertThat(rejectionAudits("tri-direct-retry")).isEqualTo(1);
+  }
+
+  @Test
+  void existingConfirmedKeyWithUnknownDestinationConflictsWithoutOverwriting() {
+    String key = "tri-existing-unknown-dest";
+    TransferCommand original = new TransferCommand(sourceId, destinationId, 40_00L, "DOP");
+    TransferResult confirmed = transfers.transfer(original, key, sourceActor);
+    Map<String, Object> before = intentRow(key);
+
+    TransferCommand unknownDestination =
+        new TransferCommand(sourceId, UUID.randomUUID(), 40_00L, "DOP");
+    assertThatThrownBy(() -> transfers.transfer(unknownDestination, key, sourceActor))
+        .isInstanceOf(TransferOperationException.class)
+        .matches(
+            e ->
+                ((TransferOperationException) e).getKind()
+                    == TransferOperationException.Kind.CONFLICT);
+
+    assertThat(intentRow(key)).isEqualTo(before);
+    assertThat(operationMovements(confirmed.operationId())).isEqualTo(2);
+    assertThat(balanceOf(sourceId)).isEqualTo(60_00L);
+    assertThat(balanceOf(destinationId)).isEqualTo(40_00L);
+    assertThat(conflictAudits(key)).isEqualTo(1);
+  }
+
+  @Test
+  void existingConfirmedKeyWithUnknownSourceConflictsWithoutOverwriting() {
+    String key = "tri-existing-unknown-source";
+    TransferCommand original = new TransferCommand(sourceId, destinationId, 40_00L, "DOP");
+    TransferResult confirmed = transfers.transfer(original, key, sourceActor);
+    Map<String, Object> before = intentRow(key);
+
+    TransferCommand unknownSource =
+        new TransferCommand(UUID.randomUUID(), destinationId, 40_00L, "DOP");
+    assertThatThrownBy(() -> transfers.transfer(unknownSource, key, sourceActor))
+        .isInstanceOf(TransferOperationException.class)
+        .matches(
+            e ->
+                ((TransferOperationException) e).getKind()
+                    == TransferOperationException.Kind.CONFLICT);
+
+    assertThat(intentRow(key)).isEqualTo(before);
+    assertThat(operationMovements(confirmed.operationId())).isEqualTo(2);
+    assertThat(balanceOf(sourceId)).isEqualTo(60_00L);
+    assertThat(balanceOf(destinationId)).isEqualTo(40_00L);
+    assertThat(conflictAudits(key)).isEqualTo(1);
+  }
+
+  @Test
+  void existingConfirmedKeyWithSameAccountConflictsWithoutOverwriting() {
+    String key = "tri-existing-same-account";
+    TransferCommand original = new TransferCommand(sourceId, destinationId, 40_00L, "DOP");
+    TransferResult confirmed = transfers.transfer(original, key, sourceActor);
+    Map<String, Object> before = intentRow(key);
+
+    TransferCommand sameAccount = new TransferCommand(sourceId, sourceId, 40_00L, "DOP");
+    assertThatThrownBy(() -> transfers.transfer(sameAccount, key, sourceActor))
+        .isInstanceOf(TransferOperationException.class)
+        .matches(
+            e ->
+                ((TransferOperationException) e).getKind()
+                    == TransferOperationException.Kind.CONFLICT);
+
+    assertThat(intentRow(key)).isEqualTo(before);
+    assertThat(operationMovements(confirmed.operationId())).isEqualTo(2);
+    assertThat(balanceOf(sourceId)).isEqualTo(60_00L);
+    assertThat(balanceOf(destinationId)).isEqualTo(40_00L);
+    assertThat(conflictAudits(key)).isEqualTo(1);
   }
 
   private Map<String, Object> intentRow(String key) {
@@ -287,6 +354,16 @@ class TransferRejectionIdentityPersistenceTest {
     Integer count =
         jdbc.queryForObject(
             "select count(*) from audit_events where action = 'TRANSFER_REJECTED'"
+                + " and resource_id = ?",
+            Integer.class,
+            key);
+    return count == null ? 0 : count;
+  }
+
+  private int conflictAudits(String key) {
+    Integer count =
+        jdbc.queryForObject(
+            "select count(*) from audit_events where action = 'TRANSFER_CONFLICT'"
                 + " and resource_id = ?",
             Integer.class,
             key);

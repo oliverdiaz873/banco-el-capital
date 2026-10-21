@@ -2,6 +2,9 @@ package com.bancoelcapital.financialops.transfer;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import java.util.Map;
 import java.util.Set;
@@ -10,8 +13,10 @@ import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.transaction.annotation.Transactional;
 
 import com.bancoelcapital.accounts.internal.AccountCreationCommand;
@@ -43,6 +48,7 @@ import jakarta.persistence.PersistenceContext;
       "spring.flyway.enabled=false",
       "spring.jpa.hibernate.ddl-auto=create-drop"
     })
+@AutoConfigureMockMvc
 @Transactional
 class TransferReplayAuthorizationTest {
 
@@ -57,6 +63,8 @@ class TransferReplayAuthorizationTest {
   @Autowired BeneficiaryService beneficiaries;
 
   @Autowired JdbcTemplate jdbc;
+
+  @Autowired MockMvc mvc;
 
   @PersistenceContext EntityManager entities;
 
@@ -201,6 +209,53 @@ class TransferReplayAuthorizationTest {
   }
 
   @Test
+  void unknownSourceRejectionRetryFailsClosedWithoutReplay() {
+    UUID unknownSource = UUID.randomUUID();
+    String key = "tra-unknown-source";
+    TransferCommand command = new TransferCommand(unknownSource, destinationId, 40_00L, "DOP");
+
+    assertThatThrownBy(() -> transfers.transfer(command, key, sourceActor))
+        .isInstanceOf(TransferOperationException.class)
+        .matches(
+            e ->
+                ((TransferOperationException) e).getKind()
+                    == TransferOperationException.Kind.REJECTED);
+    Map<String, Object> before = intentRow(key);
+    assertThat(before.get("outcome")).isEqualTo("REJECTED");
+
+    assertThatThrownBy(() -> transfers.transfer(command, key, sourceActor))
+        .isInstanceOf(TransferOperationException.class)
+        .matches(
+            e ->
+                ((TransferOperationException) e).getKind()
+                    == TransferOperationException.Kind.FORBIDDEN);
+
+    assertThat(intentRow(key)).isEqualTo(before);
+    assertThat(count("select count(*) from financial_operations where operation_type = 'TRANSFER'"))
+        .isEqualTo(1);
+    assertThat(
+            count(
+                "select count(*) from movements where operation_id = ?",
+                before.get("operation_id")))
+        .isZero();
+    assertThat(count("select count(*) from transfer_beneficiary_usage")).isZero();
+    assertThat(
+            count(
+                "select count(*) from audit_events where action = 'TRANSFER_REJECTED'"
+                    + " and resource_id = ?",
+                key))
+        .isEqualTo(1);
+    assertThat(
+            count(
+                "select count(*) from audit_events where action = 'TRANSFER_CONFLICT'"
+                    + " and resource_id = ?",
+                key))
+        .isZero();
+    assertThat(balanceOf(sourceId)).isEqualTo(100_00L);
+    assertThat(balanceOf(destinationId)).isZero();
+  }
+
+  @Test
   void confirmedWithoutOwnerSnapshotFailsClosed() {
     UUID beneficiaryId = UUID.randomUUID();
     TransferCommand command = new TransferCommand(sourceId, null, beneficiaryId, 40_00L, "DOP");
@@ -230,6 +285,91 @@ class TransferReplayAuthorizationTest {
     assertThat(count("select count(*) from audit_events where resource_id = ?", "tra-fc")).isZero();
     assertThat(balanceOf(sourceId)).isEqualTo(100_00L);
     assertThat(balanceOf(destinationId)).isZero();
+  }
+
+  /**
+   * Contrato de {@code operationId}: una fila CONFIRMED del camino directo sin referencia de
+   * operación atraviesa la autorización real contra la fuente persistida y la comparación real de
+   * intención, pero el replay falla cerrado en lugar de devolver un éxito sin identificador. No se
+   * crea ninguna operación, movimiento ni auditoría nueva.
+   */
+  @Test
+  void confirmedDirectReplayWithoutOperationIdFailsClosed() {
+    TransferCommand command = new TransferCommand(sourceId, destinationId, 40_00L, "DOP");
+    entities.persist(
+        new TransferOperationIdempotency(
+            "tra-no-op",
+            null,
+            TransferService.requestHash(command),
+            TransferOperationOutcome.CONFIRMED,
+            sourceId,
+            null,
+            "direct",
+            40_00L,
+            "DOP"));
+    entities.flush();
+
+    Map<String, Object> stored = intentRow("tra-no-op");
+    assertThat(stored.get("outcome")).isEqualTo("CONFIRMED");
+    assertThat(stored.get("operation_id")).isNull();
+
+    assertThatThrownBy(() -> transfers.transfer(command, "tra-no-op", sourceActor))
+        .isInstanceOf(TransferOperationException.class)
+        .matches(
+            e ->
+                ((TransferOperationException) e).getKind()
+                    == TransferOperationException.Kind.FAILED);
+
+    entities.flush();
+    assertThat(count("select count(*) from financial_operations where operation_type = 'TRANSFER'"))
+        .isZero();
+    assertThat(
+            count(
+                "select count(*) from movements m join financial_operations o"
+                    + " on o.id = m.operation_id where o.operation_type = 'TRANSFER'"))
+        .isZero();
+    assertThat(count("select count(*) from audit_events where resource_id = ?", "tra-no-op"))
+        .isZero();
+    assertThat(intentRow("tra-no-op")).isEqualTo(stored);
+    assertThat(balanceOf(sourceId)).isEqualTo(100_00L);
+    assertThat(balanceOf(destinationId)).isZero();
+  }
+
+  /**
+   * GET correlacionado sobre una fila sin referencia de operación: la consulta no llega al
+   * repositorio de operaciones con un id nulo (lo que produciría una excepción no controlada),
+   * respeta la autorización vigente sobre la fuente persistida y devuelve el 404 del contrato
+   * existente a un titular autorizado.
+   */
+  @Test
+  void queryWithMissingOperationReferenceReturnsControlledNotFound() throws Exception {
+    TransferCommand command = new TransferCommand(sourceId, destinationId, 40_00L, "DOP");
+    String hash = TransferService.requestHash(command);
+    entities.persist(
+        new TransferOperationIdempotency(
+            "tra-no-op-query",
+            null,
+            hash,
+            TransferOperationOutcome.CONFIRMED,
+            sourceId,
+            null,
+            "direct",
+            40_00L,
+            "DOP"));
+    entities.flush();
+
+    mvc.perform(
+            get("/api/v1/transfer-operations/tra-no-op-query")
+                .header("Idempotency-Key-Hash", hash)
+                .header("X-Actor-Id", sourceActor.subject()))
+        .andExpect(status().isNotFound());
+
+    mvc.perform(
+            get("/api/v1/transfer-operations/tra-no-op-query")
+                .header("Idempotency-Key-Hash", hash)
+                .header("X-Actor-Id", otherActor.subject()))
+        .andExpect(status().isForbidden())
+        .andExpect(jsonPath("$.operationId").doesNotExist());
   }
 
   @Test

@@ -36,6 +36,8 @@ import com.bancoelcapital.financialops.core.MovementRepository;
 import com.bancoelcapital.identity.AuthenticatedActor;
 import com.bancoelcapital.identity.AuthorizationService;
 
+import jakarta.persistence.EntityExistsException;
+
 /**
  * Transfer use case (Financial Operations module, ADR-02/ADR-04/ADR-05/ADR-18). Coordinates
  * authorization on the source holder, validation of both accounts, money-grade idempotency in a
@@ -43,6 +45,11 @@ import com.bancoelcapital.identity.AuthorizationService;
  * through the Accounts-owned contracts. Each confirmation runs in exactly one outer local
  * transaction; the winner reload after a uniqueness race runs in a separate fresh read transaction
  * (see below).
+ *
+ * <p>The idempotency key is consulted before deterministic rejections on both paths. Constructed
+ * idempotency records are persist-only (never merged over an assigned key), and a same-key loser
+ * reloads the committed winner in a fresh transaction before replay, conflict, or authorization
+ * failure. An existing rejection is therefore immutable evidence, not a row to refresh.
  *
  * <p>Both account rows are locked in deterministic UUID ascending order, regardless of transfer
  * direction, so opposite transfers cannot deadlock. The confirmation decision is taken only after
@@ -75,6 +82,7 @@ public class TransferService {
   private final TransferBeneficiaryUsageRepository usage;
   private final TransactionTemplate writeTx;
   private final TransactionTemplate readTx;
+  private final TransactionTemplate freshWriteTx;
 
   public TransferService(
       FinancialOperationRepository operations,
@@ -104,6 +112,12 @@ public class TransferService {
     // E5: the transfer write transaction pins READ COMMITTED so the beneficiary validation point
     // observes deletes committed before its second read. No other transaction is affected.
     this.writeTx.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
+    // Recovery after a failed write must not reuse the caller's rollback-only/aborted transaction.
+    // This template is intentionally used only by the catch paths, never for the main attempt or
+    // for a key that already existed when transfer() was entered.
+    this.readTx.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+    this.freshWriteTx = new TransactionTemplate(transactionManager);
+    this.freshWriteTx.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
   }
 
   public TransferResult transfer(
@@ -112,18 +126,21 @@ public class TransferService {
       throw new TransferOperationException(
           TransferOperationException.Kind.FAILED, "idempotency key is required");
     }
+    // The key is consulted before any deterministic rejection on both paths. Existing-key
+    // recovery performs its own authorization against persisted snapshots before comparing
+    // intents, so this early lookup does not turn idempotency into a cross-actor oracle.
+    String hash = requestHash(command);
+    Optional<TransferOperationIdempotency> existing = idempotency.findById(idempotencyKey);
+    if (existing.isPresent()) {
+      return recoverExisting(existing.get(), command, hash, idempotencyKey, actor);
+    }
     if (command.beneficiaryId() != null) {
       return transferViaBeneficiary(command, idempotencyKey, actor);
     }
     if (command.sourceAccountId() != null
         && command.sourceAccountId().equals(command.destinationAccountId())) {
-      String hash = requestHash(command);
-      return writeTx
-          .execute(
-              status ->
-                  reject(
-                      command, idempotencyKey, hash, actor, "source and destination must differ"))
-          .resultOrThrow();
+      return rejectOrRecover(
+          command, idempotencyKey, hash, actor, "source and destination must differ");
     }
     // Account identities are server-resolved: the client supplies only account UUIDs, never
     // holders, so authorization cannot be satisfied with a mismatched holder.
@@ -131,27 +148,20 @@ public class TransferService {
     // established "unknown holder" precedent instead of leaking through auth paths.
     Optional<String> sourceHolder = lookup.findHolderCustomerId(command.sourceAccountId());
     if (sourceHolder.isEmpty()) {
-      String hash = requestHash(command);
-      return writeTx
-          .execute(status -> reject(command, idempotencyKey, hash, actor, "unknown account"))
-          .resultOrThrow();
+      return rejectOrRecover(command, idempotencyKey, hash, actor, "unknown account");
     }
     Optional<String> destinationHolder =
         lookup.findHolderCustomerId(command.destinationAccountId());
     if (destinationHolder.isEmpty()) {
-      String hash = requestHash(command);
-      return writeTx
-          .execute(status -> reject(command, idempotencyKey, hash, actor, "unknown account"))
-          .resultOrThrow();
+      return rejectOrRecover(command, idempotencyKey, hash, actor, "unknown account");
     }
     var decision = authorization.decideTransfer(actor, sourceHolder.get());
     if (!decision.allowed()) {
       throw forbidden(decision.reason());
     }
-    String hash = requestHash(command);
-    Optional<TransferOperationIdempotency> existing = idempotency.findById(idempotencyKey);
-    if (existing.isPresent()) {
-      return recoverExisting(existing.get(), command, hash, idempotencyKey, actor);
+    Optional<TransferOperationIdempotency> lateExisting = idempotency.findById(idempotencyKey);
+    if (lateExisting.isPresent()) {
+      return recoverExisting(lateExisting.get(), command, hash, idempotencyKey, actor);
     }
     return submit(command, idempotencyKey, hash, actor, null);
   }
@@ -170,18 +180,15 @@ public class TransferService {
    */
   private TransferResult transferViaBeneficiary(
       TransferCommand command, String idempotencyKey, AuthenticatedActor actor) {
+    String hash = requestHash(command);
     Optional<String> sourceHolder = lookup.findHolderCustomerId(command.sourceAccountId());
     if (sourceHolder.isEmpty()) {
-      String hash = requestHash(command);
-      return writeTx
-          .execute(status -> reject(command, idempotencyKey, hash, actor, "unknown account"))
-          .resultOrThrow();
+      return rejectOrRecover(command, idempotencyKey, hash, actor, "unknown account");
     }
     var transferDecision = authorization.decideTransfer(actor, sourceHolder.get());
     if (!transferDecision.allowed()) {
       throw forbidden(transferDecision.reason());
     }
-    String hash = requestHash(command);
     Optional<TransferOperationIdempotency> existing = idempotency.findById(idempotencyKey);
     if (existing.isPresent()) {
       return recoverExisting(existing.get(), command, hash, idempotencyKey, actor);
@@ -189,9 +196,7 @@ public class TransferService {
     Optional<BeneficiaryResolution> resolved =
         beneficiaries.resolveForOwner(command.beneficiaryId(), actorSubject(actor));
     if (resolved.isEmpty()) {
-      return writeTx
-          .execute(status -> reject(command, idempotencyKey, hash, actor, "invalid beneficiary"))
-          .resultOrThrow();
+      return rejectOrRecover(command, idempotencyKey, hash, actor, "invalid beneficiary");
     }
     var manageDecision =
         authorization.decideManageBeneficiary(actor, resolved.get().ownerCustomerId());
@@ -200,12 +205,8 @@ public class TransferService {
     }
     if (command.sourceAccountId() != null
         && command.sourceAccountId().equals(resolved.get().destinationAccountId())) {
-      return writeTx
-          .execute(
-              status ->
-                  reject(
-                      command, idempotencyKey, hash, actor, "source and destination must differ"))
-          .resultOrThrow();
+      return rejectOrRecover(
+          command, idempotencyKey, hash, actor, "source and destination must differ");
     }
     TransferCommand effective =
         new TransferCommand(
@@ -215,6 +216,49 @@ public class TransferService {
             command.amountMinorUnits(),
             command.currency());
     return submit(effective, idempotencyKey, hash, actor, resolved.get());
+  }
+
+  /**
+   * Collision-aware deterministic rejection. The insert may lose a concurrent race for the same
+   * key; the losing write transaction rolls back completely, then the committed winner is loaded in
+   * a fresh read transaction and resolved through the normal authorization/intent checks. Without a
+   * winner the collision is not a determinable idempotency outcome and propagates.
+   */
+  private TransferResult rejectOrRecover(
+      TransferCommand command,
+      String idempotencyKey,
+      String hash,
+      AuthenticatedActor actor,
+      String reason) {
+    try {
+      return writeTx
+          .execute(status -> reject(command, idempotencyKey, hash, actor, reason))
+          .resultOrThrow();
+    } catch (DataIntegrityViolationException | EntityExistsException collision) {
+      return recoverWinnerInFreshReadTx(
+          idempotencyKey, command, hash, idempotencyKey, actor, collision);
+    }
+  }
+
+  /**
+   * Reloads the committed winner and resolves it in one independent read-only transaction. This is
+   * required after a failed write: the caller's transaction may already be rollback-only, and
+   * PostgreSQL may have aborted it entirely after a uniqueness violation. Every decisive read
+   * (operation, source holder, usage) therefore runs inside this fresh transaction, not outside it.
+   */
+  private TransferResult recoverWinnerInFreshReadTx(
+      String winnerKey,
+      TransferCommand command,
+      String hash,
+      String idempotencyKey,
+      AuthenticatedActor actor,
+      RuntimeException noWinner) {
+    return readTx.execute(
+        status ->
+            idempotency
+                .findById(winnerKey)
+                .map(winner -> recoverExisting(winner, command, hash, idempotencyKey, actor))
+                .orElseThrow(() -> noWinner));
   }
 
   /**
@@ -240,38 +284,37 @@ public class TransferService {
       // write transaction that touches no balances.
       final AttemptOutcome rejection;
       try {
+        // The main attempt transaction has already rolled back (including its first leg). Persist
+        // the terminal rejection in a fresh transaction so an outer, rollback-only caller cannot
+        // prevent it from committing.
         rejection =
-            writeTx.execute(
+            freshWriteTx.execute(
                 status -> reject(command, idempotencyKey, hash, actor, rejected.getReason()));
-      } catch (DataIntegrityViolationException collision) {
+      } catch (DataIntegrityViolationException | EntityExistsException collision) {
         // A concurrent same-key winner committed between our re-check and this insert: our
         // transaction rolled back with nothing persisted. Resolve through the existing
         // recovery path instead of leaking a persistence exception — but only when the
         // winner actually exists. Without a winner there is no financial result to return,
         // so the original collision propagates untouched.
-        Optional<TransferOperationIdempotency> lateWinner =
-            readTx.execute(status -> idempotency.findById(idempotencyKey));
-        if (lateWinner.isEmpty()) {
-          throw collision;
-        }
-        return recoverExisting(lateWinner.get(), command, hash, idempotencyKey, actor);
+        return recoverWinnerInFreshReadTx(
+            idempotencyKey, command, hash, idempotencyKey, actor, collision);
       }
       return rejection.resultOrThrow();
-    } catch (DuplicateDetected | DataIntegrityViolationException race) {
+    } catch (DuplicateDetected | DataIntegrityViolationException | EntityExistsException race) {
       // Our own write transaction rolled back with nothing persisted: either a concurrent
       // same-key attempt committed while we waited on the account row locks (detected by the
-      // post-lock re-check), or the database arbiter rejected our insert. Reload the winner
-      // in a fresh read transaction; what we read there is committed state on every engine.
-      Optional<TransferOperationIdempotency> winner =
-          readTx.execute(status -> idempotency.findById(idempotencyKey));
-      if (winner.isEmpty()) {
-        // Nothing determined: the winner may still be in flight. The caller is uncertain,
-        // not failed; recovery reuses the same key.
-        throw new TransferOperationException(
-            TransferOperationException.Kind.UNKNOWN,
-            "uncertain outcome, retry with the same idempotency key");
-      }
-      return recoverExisting(winner.get(), command, hash, idempotencyKey, actor);
+      // post-lock re-check), or the database arbiter rejected our insert. Reload and resolve
+      // the winner wholly in a fresh read transaction; what we read there is committed state
+      // on every engine.
+      return recoverWinnerInFreshReadTx(
+          idempotencyKey,
+          command,
+          hash,
+          idempotencyKey,
+          actor,
+          new TransferOperationException(
+              TransferOperationException.Kind.UNKNOWN,
+              "uncertain outcome, retry with the same idempotency key"));
     } catch (ArithmeticException overflow) {
       // Balance overflow rolled the write transaction back: determined, no effect.
       throw new TransferOperationException(
@@ -299,11 +342,21 @@ public class TransferService {
       return Optional.empty();
     }
     var record = stored.get();
-    Optional<FinancialOperation> operation = operations.findById(record.getOperationId());
-    if (operation.isEmpty()) {
-      return Optional.empty();
+    UUID operationId = record.getOperationId();
+    Optional<UUID> sourceAccountId;
+    if (operationId == null) {
+      // No operation reference: never query the operation repository with a null id. The
+      // persisted intent source is the only authoritative source left, so authorization still
+      // runs against it before this row is reported as absent under the existing GET contract.
+      sourceAccountId = Optional.ofNullable(record.getSourceAccountId());
+    } else {
+      Optional<FinancialOperation> operation = operations.findById(operationId);
+      if (operation.isEmpty()) {
+        return Optional.empty();
+      }
+      sourceAccountId = Optional.of(operation.get().getAccountId());
     }
-    Optional<String> sourceHolder = lookup.findHolderCustomerId(operation.get().getAccountId());
+    Optional<String> sourceHolder = sourceAccountId.flatMap(lookup::findHolderCustomerId);
     if (sourceHolder.isEmpty()) {
       return Optional.empty();
     }
@@ -311,7 +364,12 @@ public class TransferService {
     if (!queryDecision.allowed()) {
       throw forbidden(queryDecision.reason());
     }
-    return Optional.of(new TransferOutcome(record.getOperationId(), record.getOutcome()));
+    if (operationId == null) {
+      // An inconsistent row has no reportable operation: absence maps to the existing 404,
+      // never to a fabricated confirmed result.
+      return Optional.empty();
+    }
+    return Optional.of(new TransferOutcome(operationId, record.getOutcome()));
   }
 
   /**
@@ -489,6 +547,9 @@ public class TransferService {
             idempotencyKey,
             "REJECTED",
             reason));
+    // Surface a same-key uniqueness collision inside this transaction, before commit. The caller
+    // then observes a fully rolled-back loser and can reload the committed winner separately.
+    operations.flush();
     return new AttemptOutcome.Rejected(reason);
   }
 
@@ -498,7 +559,7 @@ public class TransferService {
    * moves and idempotency state is untouched. Never called from inside a read-only transaction.
    */
   private TransferResult conflict(String idempotencyKey, AuthenticatedActor actor) {
-    writeTx.execute(
+    freshWriteTx.execute(
         status -> {
           audit.record(
               new AuditEntry(
@@ -523,6 +584,11 @@ public class TransferService {
    * and reveals nothing about match versus conflict. The live beneficiary table is never consulted.
    * Historical rows and owner-absent invalid rejections need source-only authorization. A confirmed
    * beneficiary row without an owner snapshot fails closed.
+   *
+   * <p>This method runs in the caller's transaction. Existing-key recovery at the start of {@link
+   * #transfer} deliberately keeps that transaction so read-your-writes is preserved. Only
+   * post-failure callers wrap it inside {@code readTx} ({@code REQUIRES_NEW}); conflict evidence is
+   * always written by {@code freshWriteTx}.
    */
   private TransferResult recoverExisting(
       TransferOperationIdempotency stored,
@@ -578,6 +644,14 @@ public class TransferService {
     if (stored.getOutcome() == TransferOperationOutcome.REJECTED) {
       throw new TransferOperationException(
           TransferOperationException.Kind.REJECTED, "request previously rejected");
+    }
+    // A CONFIRMED record must reference the operation it confirms. Without that reference the
+    // persisted evidence is inconsistent: returning success would hand the client a confirmed
+    // transfer with no operation id, and inventing one would fabricate financial history.
+    if (stored.getOperationId() == null) {
+      throw new TransferOperationException(
+          TransferOperationException.Kind.FAILED,
+          "stored confirmed transfer has no operation reference");
     }
     return new TransferResult(stored.getOperationId(), false);
   }

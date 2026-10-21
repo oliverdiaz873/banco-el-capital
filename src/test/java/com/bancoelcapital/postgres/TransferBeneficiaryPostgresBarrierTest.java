@@ -262,6 +262,53 @@ class TransferBeneficiaryPostgresBarrierTest extends AbstractPostgresTest {
     assertThat(balanceOf(destinationId)).isEqualTo(10_00L);
   }
 
+  @Test
+  void directAndBeneficiarySameKeyConvergeToSingleEffect() throws Exception {
+    UUID beneficiaryId = saveBeneficiary("tbp-cross");
+    String key = "tbp-cross-use-" + tag;
+    TransferCommand direct = new TransferCommand(sourceId, destinationId, 10_00L, "DOP");
+    TransferCommand viaBeneficiary =
+        new TransferCommand(sourceId, null, beneficiaryId, 10_00L, "DOP");
+
+    ExecutorService pool = Executors.newFixedThreadPool(2);
+    TransferResult winner = null;
+    int conflicts = 0;
+    try {
+      List<Future<TransferResult>> futures =
+          List.of(
+              pool.submit(() -> transfers.transfer(direct, key, sourceActor)),
+              pool.submit(() -> transfers.transfer(viaBeneficiary, key, sourceActor)));
+      for (Future<TransferResult> future : futures) {
+        try {
+          TransferResult result = future.get(120, TimeUnit.SECONDS);
+          assertThat(result.created()).isTrue();
+          winner = result;
+        } catch (ExecutionException e) {
+          assertThat(e.getCause()).isInstanceOf(TransferOperationException.class);
+          assertThat(((TransferOperationException) e.getCause()).getKind())
+              .isEqualTo(TransferOperationException.Kind.CONFLICT);
+          conflicts++;
+        }
+      }
+    } finally {
+      pool.shutdownNow();
+    }
+
+    assertThat(winner).isNotNull();
+    assertThat(conflicts).isEqualTo(1);
+    Map<String, Object> row = intentRow(key);
+    assertThat(row.get("outcome")).isEqualTo("CONFIRMED");
+    assertThat(row.get("operation_id")).isEqualTo(winner.operationId());
+    assertThat(operationMovements(winner.operationId())).isEqualTo(2);
+    assertThat(balanceOf(sourceId)).isEqualTo(90_00L);
+    assertThat(balanceOf(destinationId)).isEqualTo(10_00L);
+    if ("beneficiary-transfer".equals(row.get("path"))) {
+      assertThat(usageCount(winner.operationId())).isEqualTo(1);
+    } else {
+      assertThat(usageCount(winner.operationId())).isZero();
+    }
+  }
+
   private UUID saveBeneficiary(String key) {
     return beneficiaries
         .create(new BeneficiaryCommand(destinationId, "Ahorros"), key, sourceActor)
