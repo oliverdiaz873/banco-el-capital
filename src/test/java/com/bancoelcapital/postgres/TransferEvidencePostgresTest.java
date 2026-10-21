@@ -12,7 +12,10 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import com.bancoelcapital.accounts.internal.AccountCreationCommand;
 import com.bancoelcapital.accounts.internal.AccountCreationService;
@@ -57,6 +60,8 @@ class TransferEvidencePostgresTest extends AbstractPostgresTest {
   @Autowired AccountCreationService accounts;
 
   @Autowired JdbcTemplate jdbc;
+
+  @Autowired PlatformTransactionManager transactionManager;
 
   UUID sourceId;
   UUID destinationId;
@@ -138,6 +143,48 @@ class TransferEvidencePostgresTest extends AbstractPostgresTest {
         entities.find(TransferOperationIdempotency.class, "k-pg-benef");
     assertThat(found.getBeneficiaryId()).isEqualTo(beneficiary);
     assertThat(found.getPath()).isEqualTo("beneficiary-transfer");
+  }
+
+  /**
+   * H-02 boundary proof on the real schema: PostgreSQL's V8 foreign key rejects a CONFIRMED
+   * idempotency row whose non-null operation_id has no financial_operations row. The failed insert
+   * runs in its own transaction so the aborted transaction cannot contaminate later checks. This is
+   * not a substitute for the H2 application-level fail-closed test.
+   */
+  @Test
+  void orphanOperationReferenceIsRejectedByForeignKey() {
+    String key = "k-pg-orphan-" + tag;
+    UUID orphanOperationId = UUID.randomUUID();
+    TransactionTemplate tx = new TransactionTemplate(transactionManager);
+    tx.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+
+    assertThatThrownBy(
+            () ->
+                tx.execute(
+                    status -> {
+                      entities.persist(
+                          new TransferOperationIdempotency(
+                              key,
+                              orphanOperationId,
+                              "hash",
+                              TransferOperationOutcome.CONFIRMED,
+                              sourceId,
+                              null,
+                              "direct",
+                              100L,
+                              "DOP"));
+                      entities.flush();
+                      return null;
+                    }))
+        .isInstanceOf(PersistenceException.class)
+        .hasMessageContaining("foreign key");
+
+    Integer rows =
+        jdbc.queryForObject(
+            "select count(*) from transfer_operation_idempotency where idempotency_key = ?",
+            Integer.class,
+            key);
+    assertThat(rows).isZero();
   }
 
   @Test
