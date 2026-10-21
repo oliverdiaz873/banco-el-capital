@@ -141,6 +141,56 @@ class TransferPostgresConcurrencyTest extends AbstractPostgresTest {
   }
 
   @Test
+  void sameKeyDisjointAccountPairsCannotBothConfirm() throws Exception {
+    UUID secondSourceId =
+        accounts
+            .create(
+                new AccountCreationCommand(sourceActor.subject(), "DOP", "BASIC"),
+                "a-tts2-" + tag,
+                sourceActor)
+            .accountId();
+    UUID secondDestinationId =
+        accounts
+            .create(
+                new AccountCreationCommand(destinationActor.subject(), "DOP", "BASIC"),
+                "a-ttd2-" + tag,
+                destinationActor)
+            .accountId();
+    deposits.deposit(
+        new DepositCommand(secondSourceId, 100_00L, "DOP"), "f-tts2-" + tag, sourceActor);
+
+    String key = "tdisjoint-" + tag;
+    Outcome outcome =
+        runParallel(
+            List.of(
+                new TransferCommand(sourceId, destinationId, 10_00L, "DOP"),
+                new TransferCommand(secondSourceId, secondDestinationId, 20_00L, "DOP")),
+            List.of(key, key),
+            List.of(sourceActor, sourceActor));
+
+    assertThat(outcome.results()).hasSize(1);
+    assertThat(outcome.results().get(0).created()).isTrue();
+    assertThat(outcome.failures()).hasSize(1).allMatch(TransferPostgresConcurrencyTest::isConflict);
+    assertThat(
+            jdbc.queryForObject(
+                "select count(*) from financial_operations where account_id in (?, ?)"
+                    + " and operation_type = 'TRANSFER' and status = 'CONFIRMED'",
+                Long.class,
+                sourceId,
+                secondSourceId))
+        .isEqualTo(1);
+    assertThat(transferDebitCount(sourceId) + transferDebitCount(secondSourceId)).isEqualTo(1);
+    assertThat(transferCreditCount(destinationId) + transferCreditCount(secondDestinationId))
+        .isEqualTo(1);
+    assertThat(
+            balanceOf(sourceId)
+                + balanceOf(secondSourceId)
+                + balanceOf(destinationId)
+                + balanceOf(secondDestinationId))
+        .isEqualTo(300_00L);
+  }
+
+  @Test
   void manySmallTransfersAllConfirmWhenFundsCoverThem() throws Exception {
     List<TransferCommand> commands = new ArrayList<>();
     List<String> keys = new ArrayList<>();
@@ -203,6 +253,12 @@ class TransferPostgresConcurrencyTest extends AbstractPostgresTest {
     return throwable instanceof TransferOperationException
         && ((TransferOperationException) throwable).getKind()
             == TransferOperationException.Kind.REJECTED;
+  }
+
+  private static boolean isConflict(Throwable throwable) {
+    return throwable instanceof TransferOperationException
+        && ((TransferOperationException) throwable).getKind()
+            == TransferOperationException.Kind.CONFLICT;
   }
 
   private long confirmedTransferOperationCount() {

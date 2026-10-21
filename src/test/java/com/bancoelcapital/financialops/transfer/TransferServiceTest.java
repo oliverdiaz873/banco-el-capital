@@ -304,7 +304,8 @@ class TransferServiceTest {
             "direct",
             10_00L,
             "DOP");
-    when(idempotency.findById("k1")).thenReturn(Optional.empty(), Optional.of(winner));
+    when(idempotency.findById("k1"))
+        .thenReturn(Optional.empty(), Optional.empty(), Optional.of(winner));
     when(debits.applyDebit(any(AccountDebitCommand.class)))
         .thenReturn(new AccountDebitResult(AccountDebitResult.AccountDebitOutcome.APPLIED, 90_00L));
     when(credits.applyCredit(any(AccountCreditCommand.class)))
@@ -336,7 +337,8 @@ class TransferServiceTest {
             "direct",
             10_00L,
             "DOP");
-    when(idempotency.findById("k1")).thenReturn(Optional.empty(), Optional.of(winner));
+    when(idempotency.findById("k1"))
+        .thenReturn(Optional.empty(), Optional.empty(), Optional.of(winner));
     when(debits.applyDebit(any(AccountDebitCommand.class)))
         .thenReturn(new AccountDebitResult(AccountDebitResult.AccountDebitOutcome.APPLIED, 90_00L));
     when(credits.applyCredit(any(AccountCreditCommand.class)))
@@ -377,7 +379,7 @@ class TransferServiceTest {
             10_00L,
             "DOP");
     when(idempotency.findById("k1"))
-        .thenReturn(Optional.empty(), Optional.empty(), Optional.of(winner));
+        .thenReturn(Optional.empty(), Optional.empty(), Optional.empty(), Optional.of(winner));
     when(debits.applyDebit(any(AccountDebitCommand.class)))
         .thenReturn(new AccountDebitResult(AccountDebitResult.AccountDebitOutcome.APPLIED, 90_00L));
     when(credits.applyCredit(any(AccountCreditCommand.class)))
@@ -413,7 +415,7 @@ class TransferServiceTest {
             10_00L,
             "DOP");
     when(idempotency.findById("k1"))
-        .thenReturn(Optional.empty(), Optional.empty(), Optional.of(winner));
+        .thenReturn(Optional.empty(), Optional.empty(), Optional.empty(), Optional.of(winner));
     when(debits.applyDebit(any(AccountDebitCommand.class)))
         .thenReturn(new AccountDebitResult(AccountDebitResult.AccountDebitOutcome.APPLIED, 90_00L));
     when(credits.applyCredit(any(AccountCreditCommand.class)))
@@ -478,7 +480,6 @@ class TransferServiceTest {
     String hash = TransferService.requestHash(command);
     UUID operationId = UUID.randomUUID();
     when(lookup.findHolderCustomerId(sourceId)).thenReturn(Optional.of("holder-source"));
-    when(lookup.findHolderCustomerId(destinationId)).thenReturn(Optional.of("holder-dest"));
     when(authorization.decideTransfer(actor, "holder-source"))
         .thenReturn(AuthorizationDecision.allow());
     when(idempotency.findById("k1"))
@@ -509,7 +510,6 @@ class TransferServiceTest {
   @Test
   void conflictsOnSameKeyWithDifferentPayload() {
     when(lookup.findHolderCustomerId(sourceId)).thenReturn(Optional.of("holder-source"));
-    when(lookup.findHolderCustomerId(destinationId)).thenReturn(Optional.of("holder-dest"));
     when(authorization.decideTransfer(actor, "holder-source"))
         .thenReturn(AuthorizationDecision.allow());
     when(idempotency.findById("k1"))
@@ -562,6 +562,7 @@ class TransferServiceTest {
     // Pre-check sees nothing; the post-lock re-check finds the committed winner.
     when(idempotency.findById("k1"))
         .thenReturn(
+            Optional.empty(),
             Optional.empty(),
             Optional.of(
                 new TransferOperationIdempotency(
@@ -720,5 +721,30 @@ class TransferServiceTest {
             e ->
                 ((TransferOperationException) e).getKind()
                     == TransferOperationException.Kind.FORBIDDEN);
+  }
+
+  @Test
+  void queryWithMissingOperationReferenceStaysEmptyWithoutRepositoryLookup() {
+    String hash = TransferService.requestHash(command);
+    when(idempotency.findById("k1"))
+        .thenReturn(
+            Optional.of(
+                new TransferOperationIdempotency(
+                    "k1",
+                    null,
+                    hash,
+                    TransferOperationOutcome.CONFIRMED,
+                    sourceId,
+                    null,
+                    "direct",
+                    10_00L,
+                    "DOP")));
+    when(lookup.findHolderCustomerId(sourceId)).thenReturn(Optional.of("holder-source"));
+    when(authorization.decideTransfer(actor, "holder-source"))
+        .thenReturn(AuthorizationDecision.allow());
+
+    assertThat(service.findAuthorizedByKey("k1", hash, actor)).isEmpty();
+
+    verify(operations, never()).findById(any());
   }
 }

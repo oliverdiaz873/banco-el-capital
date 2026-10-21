@@ -5,13 +5,17 @@ import java.util.UUID;
 
 import org.hibernate.annotations.Check;
 import org.hibernate.annotations.Checks;
+import org.springframework.data.domain.Persistable;
 
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
 import jakarta.persistence.Enumerated;
 import jakarta.persistence.Id;
+import jakarta.persistence.PostLoad;
+import jakarta.persistence.PostPersist;
 import jakarta.persistence.Table;
+import jakarta.persistence.Transient;
 
 /**
  * Idempotency record for transfer operations (ADR-06, ADR-18, ADR-21). Dedicated namespace,
@@ -40,11 +44,19 @@ import jakarta.persistence.Table;
           "(path is null or (path = 'direct' and beneficiary_id is null)"
               + " or (path = 'beneficiary-transfer' and beneficiary_id is not null))")
 })
-public class TransferOperationIdempotency {
+public class TransferOperationIdempotency implements Persistable<String> {
 
   @Id
   @Column(name = "idempotency_key", length = 128)
   private String idempotencyKey;
+
+  /**
+   * Spring Data must call {@code persist}, never {@code merge}, for a newly constructed record. An
+   * assigned identifier alone makes the default entity information consider the entity non-new,
+   * which lets {@code save()} overwrite the stored row. The flag is true only for
+   * constructor-created instances and flips false after load/persist.
+   */
+  @Transient private boolean isNew = true;
 
   @Column(name = "operation_id")
   private UUID operationId;
@@ -114,6 +126,22 @@ public class TransferOperationIdempotency {
     this.amountMinorUnits = amountMinorUnits;
     this.currency = currency;
     this.createdAt = Instant.now();
+  }
+
+  @Override
+  public String getId() {
+    return idempotencyKey;
+  }
+
+  @Override
+  public boolean isNew() {
+    return isNew;
+  }
+
+  @PostLoad
+  @PostPersist
+  void markNotNew() {
+    this.isNew = false;
   }
 
   public String getIdempotencyKey() {

@@ -1,9 +1,11 @@
 package com.bancoelcapital.financialops.transfer;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
@@ -106,6 +108,67 @@ class TransferConcurrencyTest {
   }
 
   @Test
+  void sameKeyDisjointAccountPairsCannotBothConfirm() throws Exception {
+    UUID secondSourceId =
+        accounts
+            .create(
+                new AccountCreationCommand(sourceActor.subject(), "DOP", "BASIC"),
+                "a-tsrc2-" + tag,
+                sourceActor)
+            .accountId();
+    UUID secondDestinationId =
+        accounts
+            .create(
+                new AccountCreationCommand(destinationActor.subject(), "DOP", "BASIC"),
+                "a-tdst2-" + tag,
+                destinationActor)
+            .accountId();
+    deposits.deposit(
+        new DepositCommand(secondSourceId, 100_00L, "DOP"), "f-tsrc2-" + tag, sourceActor);
+
+    String key = "tdisjoint-" + tag;
+    Outcome outcome =
+        runParallel(
+            List.of(
+                new TransferCommand(sourceId, destinationId, 10_00L, "DOP"),
+                new TransferCommand(secondSourceId, secondDestinationId, 20_00L, "DOP")),
+            List.of(key, key));
+
+    assertThat(outcome.results()).hasSize(1);
+    assertThat(outcome.results().get(0).created()).isTrue();
+    assertThat(outcome.failures())
+        .hasSize(1)
+        .allMatch(
+            t ->
+                t instanceof TransferOperationException
+                    && ((TransferOperationException) t).getKind()
+                        == TransferOperationException.Kind.CONFLICT);
+    assertThat(
+            jdbc.queryForObject(
+                "select count(*) from financial_operations where account_id in (?, ?)"
+                    + " and operation_type = 'TRANSFER'",
+                Long.class,
+                sourceId,
+                secondSourceId))
+        .isEqualTo(1);
+    assertThat(
+            jdbc.queryForObject(
+                "select count(*) from movements m join financial_operations o"
+                    + " on o.id = m.operation_id where o.account_id in (?, ?)"
+                    + " and o.operation_type = 'TRANSFER'",
+                Long.class,
+                sourceId,
+                secondSourceId))
+        .isEqualTo(2);
+    assertThat(
+            balanceOf(sourceId)
+                + balanceOf(secondSourceId)
+                + balanceOf(destinationId)
+                + balanceOf(secondDestinationId))
+        .isEqualTo(300_00L);
+  }
+
+  @Test
   void sameKeyDifferentPayloadConflictsWithoutRawPersistenceError() throws Exception {
     String key = "tkc-" + tag;
     Outcome outcome =
@@ -176,6 +239,35 @@ class TransferConcurrencyTest {
   }
 
   @Test
+  void insufficientFundsRejectionIsNotOverwrittenByLaterFundedRetry() {
+    String key = "tins-" + tag;
+    TransferCommand command = new TransferCommand(sourceId, destinationId, 200_00L, "DOP");
+    assertThatThrownBy(() -> transfers.transfer(command, key, sourceActor))
+        .isInstanceOf(TransferOperationException.class)
+        .matches(
+            e ->
+                ((TransferOperationException) e).getKind()
+                    == TransferOperationException.Kind.REJECTED);
+    Map<String, Object> before = intentRow(key);
+
+    deposits.deposit(new DepositCommand(sourceId, 200_00L, "DOP"), "f-topup-" + tag, sourceActor);
+    assertThatThrownBy(() -> transfers.transfer(command, key, sourceActor))
+        .isInstanceOf(TransferOperationException.class)
+        .matches(
+            e ->
+                ((TransferOperationException) e).getKind()
+                    == TransferOperationException.Kind.REJECTED);
+
+    assertThat(intentRow(key)).isEqualTo(before);
+    assertThat(balanceOf(sourceId)).isEqualTo(300_00L);
+    assertThat(balanceOf(destinationId)).isEqualTo(100_00L);
+    assertThat(transferOperationCount()).isEqualTo(1);
+    assertThat(confirmedTransferOperationCount()).isZero();
+    assertThat(debitCount(sourceId)).isZero();
+    assertThat(rejectionAudits(key)).isEqualTo(1);
+  }
+
+  @Test
   void parallelDistinctKeysAllConfirmWhenFundsCoverThem() throws Exception {
     List<TransferCommand> commands = new ArrayList<>();
     List<String> keys = new ArrayList<>();
@@ -235,6 +327,24 @@ class TransferConcurrencyTest {
     } finally {
       pool.shutdownNow();
     }
+  }
+
+  private Map<String, Object> intentRow(String key) {
+    return jdbc.queryForMap(
+        "select operation_id, outcome, request_hash, source_account_id, beneficiary_id, path,"
+            + " amount_minor_units, currency from transfer_operation_idempotency"
+            + " where idempotency_key = ?",
+        key);
+  }
+
+  private int rejectionAudits(String key) {
+    Integer count =
+        jdbc.queryForObject(
+            "select count(*) from audit_events where action = 'TRANSFER_REJECTED'"
+                + " and resource_id = ?",
+            Integer.class,
+            key);
+    return count == null ? 0 : count;
   }
 
   private long transferOperationCount() {

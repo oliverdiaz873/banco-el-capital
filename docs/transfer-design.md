@@ -212,10 +212,13 @@ Three disjoint outcomes, following Deposit/Withdrawal discipline:
 
 - `REJECTED`: deterministic business verdict reached inside the write unit and
   committed as operation + idempotency `REJECTED` + rejection audit. Replay of
-  the same key plus same payload returns the same rejection without new
-  effects. Examples: unknown source/destination, same-account, inoperable
-  either side, currency mismatch, invalid amount, insufficient funds,
-  unauthorized actor.
+  the same key plus same payload returns the same rejection without new effects
+  when the persisted source holder can still be resolved and the actor is
+  authorized under the ADR-21 recovery rules. If the persisted source is
+  unknown or unresolvable, POST recovery fails closed with `403 FORBIDDEN`
+  without replaying; possession of the key and payload is not authorization.
+  Examples: unknown source/destination, same-account, inoperable either side,
+  currency mismatch, invalid amount, insufficient funds, unauthorized actor.
 - `FAILED`: determined technical failure with no financial effect, committed as
   operation + idempotency `FAILED` only when the system positively determines
   no effect occurred (for example `ArithmeticException` from
@@ -249,10 +252,13 @@ source-lowercase-uuid|destination-lowercase-uuid|amount-base10|currency-upper
   encoded lowercase (64 chars), mirroring `account|amount|currency` discipline
   of Deposit/Withdrawal. The same logical intent MUST produce the same hash on
   every retry; any deviation in normalization is a conflict risk, not a replay.
-- Same key plus same payload on a confirmed transfer replays without new
-  effects and without new audit of the original effect (`200`, `created=false`).
-- Same key plus same payload on a rejected transfer returns the same
-  deterministic rejection without new effects.
+- Authorized same key plus same payload on a confirmed transfer replays without
+  new effects and without new audit of the original effect (`200`,
+  `created=false`).
+- Authorized same key plus same payload on a rejected transfer returns the same
+  deterministic rejection without new effects. If the persisted source holder
+  cannot be resolved, POST recovery fails closed with `403 FORBIDDEN` and
+  replays nothing (ADR-21).
 - Same key plus different payload is a conflict (`409`); no money moves and
   idempotency state is untouched; conflict evidence (`TRANSFER_CONFLICT`) is
   recorded in its own write unit.
@@ -447,7 +453,9 @@ Invariant-based, mirroring Deposit/Withdrawal layers plus two-row contention:
       destination cannot be confused; no `destination_account_id` column and
       no schema migration are introduced for this MVP.
 - [ ] Same `Idempotency-Key` plus same payload replays without new effects and
-      without new audit.
+      without new audit when recovery authorization succeeds; otherwise it
+      fails closed with `403 FORBIDDEN` per ADR-21, without replay and without
+      new effects.
 - [ ] Same key plus different payload is a conflict; no money moves.
 - [ ] Different keys with identical payload are separate transfers (the second
       may reject for insufficiency even if the first confirmed).
