@@ -8,6 +8,8 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -70,6 +72,15 @@ import jakarta.persistence.EntityExistsException;
 @Service
 public class TransferService {
 
+  /**
+   * Stable internal diagnostic for the H-02 anomaly. It intentionally carries no idempotency key,
+   * operation id, actor, account, amount or hash: the event name alone identifies the failure.
+   */
+  private static final String CONFIRMED_OPERATION_MISSING =
+      "transfer.recovery.confirmed_operation_missing";
+
+  private static final Logger log = LoggerFactory.getLogger(TransferService.class);
+
   private final FinancialOperationRepository operations;
   private final MovementRepository movements;
   private final TransferOperationIdempotencyRepository idempotency;
@@ -125,6 +136,13 @@ public class TransferService {
     if (idempotencyKey == null || idempotencyKey.isBlank()) {
       throw new TransferOperationException(
           TransferOperationException.Kind.FAILED, "idempotency key is required");
+    }
+    // Authentication boundary: reject before hashing the intent or touching account,
+    // idempotency, operation, audit or persistence state. This keeps known, unknown and
+    // same-account sources indistinguishable to an unauthenticated caller.
+    if (actor == null || actor.subject() == null || actor.subject().isBlank()) {
+      throw new TransferOperationException(
+          TransferOperationException.Kind.UNAUTHENTICATED, "unauthenticated actor");
     }
     // The key is consulted before any deterministic rejection on both paths. Existing-key
     // recovery performs its own authorization against persisted snapshots before comparing
@@ -603,14 +621,25 @@ public class TransferService {
     return replay(stored);
   }
 
+  /**
+   * Authorizes a replay against persisted snapshots. Ordering is deliberate: source and (when
+   * evidenced) beneficiary-owner authorization complete first, so a foreign actor receives the
+   * ordinary 403 and never learns that the persisted row is corrupt. Only then is the H-02 anomaly
+   * surfaced, before intent comparison, so a mismatched payload also fails closed without a
+   * conflict audit and a dangling reference is never replayed as success.
+   *
+   * <p>A confirmed beneficiary row without a usage snapshot remains unauthorized (403): its owner
+   * cannot be proven, so the anomaly is not disclosed. On PostgreSQL such a row cannot reference a
+   * missing operation because of the V8 foreign key.
+   */
   private void authorizeReplay(TransferOperationIdempotency stored, AuthenticatedActor actor) {
+    UUID operationId = stored.getOperationId();
+    Optional<FinancialOperation> operation =
+        operationId == null ? Optional.empty() : operations.findById(operationId);
     UUID source =
-        stored.getOperationId() == null
+        operationId == null
             ? stored.getSourceAccountId()
-            : operations
-                .findById(stored.getOperationId())
-                .map(FinancialOperation::getAccountId)
-                .orElse(stored.getSourceAccountId());
+            : operation.map(FinancialOperation::getAccountId).orElse(stored.getSourceAccountId());
     Optional<String> holder =
         source == null ? Optional.empty() : lookup.findHolderCustomerId(source);
     if (holder.isEmpty()) {
@@ -620,23 +649,31 @@ public class TransferService {
     if (!transferDecision.allowed()) {
       throw forbidden(transferDecision.reason());
     }
-    if (!"beneficiary-transfer".equals(stored.getPath())) {
-      return;
-    }
-    Optional<TransferBeneficiaryUsage> use =
-        stored.getOperationId() == null
-            ? Optional.empty()
-            : usage.findById(stored.getOperationId());
-    if (use.isEmpty()) {
-      if (stored.getOutcome() == TransferOperationOutcome.CONFIRMED) {
-        throw forbidden("beneficiary owner snapshot unavailable");
+    if ("beneficiary-transfer".equals(stored.getPath())) {
+      Optional<TransferBeneficiaryUsage> use =
+          operationId == null ? Optional.empty() : usage.findById(operationId);
+      if (use.isEmpty()) {
+        if (stored.getOutcome() == TransferOperationOutcome.CONFIRMED) {
+          throw forbidden("beneficiary owner snapshot unavailable");
+        }
+      } else {
+        var manageDecision =
+            authorization.decideManageBeneficiary(actor, use.get().getBeneficiaryOwner());
+        if (!manageDecision.allowed()) {
+          throw forbidden(manageDecision.reason());
+        }
       }
-      return;
     }
-    var manageDecision =
-        authorization.decideManageBeneficiary(actor, use.get().getBeneficiaryOwner());
-    if (!manageDecision.allowed()) {
-      throw forbidden(manageDecision.reason());
+    // H-02: a CONFIRMED row must reference an operation that can be resolved. This runs after all
+    // applicable authorization and before matchesIntent, so denial still wins, a mismatch is not
+    // reported as a conflict, and the anomaly never produces a successful replay or new effects.
+    if (operationId != null
+        && operation.isEmpty()
+        && stored.getOutcome() == TransferOperationOutcome.CONFIRMED) {
+      log.warn(CONFIRMED_OPERATION_MISSING);
+      throw new TransferOperationException(
+          TransferOperationException.Kind.FAILED,
+          "stored confirmed transfer operation reference is unavailable");
     }
   }
 

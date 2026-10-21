@@ -3,6 +3,7 @@ package com.bancoelcapital.financialops.transfer;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -10,11 +11,14 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.transaction.annotation.Transactional;
@@ -32,6 +36,10 @@ import com.bancoelcapital.financialops.deposit.DepositCommand;
 import com.bancoelcapital.financialops.deposit.DepositService;
 import com.bancoelcapital.identity.AuthenticatedActor;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.PersistenceContext;
 
@@ -68,6 +76,9 @@ class TransferReplayAuthorizationTest {
 
   @PersistenceContext EntityManager entities;
 
+  private Logger transferLogger;
+  private ListAppender<ILoggingEvent> appender;
+
   UUID sourceId;
   UUID destinationId;
   AuthenticatedActor sourceActor;
@@ -94,6 +105,21 @@ class TransferReplayAuthorizationTest {
                 destinationActor)
             .accountId();
     deposits.deposit(new DepositCommand(sourceId, 100_00L, "DOP"), "f-tra", sourceActor);
+  }
+
+  @BeforeEach
+  void attachTransferLogAppender() {
+    transferLogger = (Logger) LoggerFactory.getLogger(TransferService.class);
+    appender = new ListAppender<>();
+    appender.start();
+    transferLogger.addAppender(appender);
+    transferLogger.setLevel(Level.WARN);
+  }
+
+  @AfterEach
+  void detachTransferLogAppender() {
+    transferLogger.detachAppender(appender);
+    appender.stop();
   }
 
   @Test
@@ -336,6 +362,197 @@ class TransferReplayAuthorizationTest {
   }
 
   /**
+   * Contrato de {@code operationId}: una fila CONFIRMED con una referencia no nula que no existe
+   * tampoco puede presentarse como recuperación exitosa. El replay falla cerrado, no crea efectos
+   * nuevos y el GET mantiene su 404 existente.
+   */
+  @Test
+  void confirmedDirectReplayWithDanglingNonNullOperationIdFailsClosed() throws Exception {
+    TransferCommand command = new TransferCommand(sourceId, destinationId, 40_00L, "DOP");
+    String hash = TransferService.requestHash(command);
+    UUID danglingOperationId = UUID.randomUUID();
+    entities.persist(
+        new TransferOperationIdempotency(
+            "tra-dangling-op",
+            danglingOperationId,
+            hash,
+            TransferOperationOutcome.CONFIRMED,
+            sourceId,
+            null,
+            "direct",
+            40_00L,
+            "DOP"));
+    entities.flush();
+    Map<String, Object> before = intentRow("tra-dangling-op");
+
+    mvc.perform(
+            post("/api/v1/transfers")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(
+                    "{\"sourceAccountId\":\""
+                        + sourceId
+                        + "\",\"destinationAccountId\":\""
+                        + destinationId
+                        + "\",\"amountMinorUnits\":4000,\"currency\":\"DOP\"}")
+                .header("Idempotency-Key", "tra-dangling-op")
+                .header("X-Actor-Id", sourceActor.subject()))
+        .andExpect(status().isInternalServerError())
+        .andExpect(jsonPath("$.operationId").doesNotExist());
+
+    mvc.perform(
+            get("/api/v1/transfer-operations/tra-dangling-op")
+                .header("Idempotency-Key-Hash", hash)
+                .header("X-Actor-Id", sourceActor.subject()))
+        .andExpect(status().isNotFound());
+
+    entities.flush();
+    assertThat(intentRow("tra-dangling-op")).isEqualTo(before);
+    assertThat(count("select count(*) from financial_operations where operation_type = 'TRANSFER'"))
+        .isZero();
+    assertThat(
+            count(
+                "select count(*) from movements m join financial_operations o"
+                    + " on o.id = m.operation_id where o.operation_type = 'TRANSFER'"))
+        .isZero();
+    assertThat(count("select count(*) from audit_events where resource_id = ?", "tra-dangling-op"))
+        .isZero();
+    assertThat(balanceOf(sourceId)).isEqualTo(100_00L);
+    assertThat(balanceOf(destinationId)).isZero();
+  }
+
+  /**
+   * H-02 ordering: authorization against the persisted source wins over corruption detection. A
+   * foreign actor keeps the ordinary 403 and never learns that the row references a missing
+   * operation; the guard does not turn denial into a 500.
+   */
+  @Test
+  void confirmedDanglingOperationReplayFromForeignActorIsDenied() throws Exception {
+    TransferCommand command = new TransferCommand(sourceId, destinationId, 40_00L, "DOP");
+    String key = "tra-dangling-foreign";
+    UUID danglingOperationId = UUID.randomUUID();
+    entities.persist(
+        new TransferOperationIdempotency(
+            key,
+            danglingOperationId,
+            TransferService.requestHash(command),
+            TransferOperationOutcome.CONFIRMED,
+            sourceId,
+            null,
+            "direct",
+            40_00L,
+            "DOP"));
+    entities.flush();
+    Map<String, Object> before = intentRow(key);
+
+    postTransfer(key, otherActor.subject(), 40_00L)
+        .andExpect(status().isForbidden())
+        .andExpect(jsonPath("$.operationId").doesNotExist());
+
+    entities.flush();
+    assertThat(intentRow(key)).isEqualTo(before);
+    assertThat(count("select count(*) from audit_events where resource_id = ?", key)).isZero();
+    assertNoNewTransferEffects();
+  }
+
+  /**
+   * H-02 ordering: a different intent must not reach the conflict path while the confirmed
+   * operation reference is dangling. The response is the existing generic 500, no TRANSFER_CONFLICT
+   * evidence is recorded, and the anomaly logs one stable event without identifiers or payload.
+   */
+  @Test
+  void confirmedDanglingOperationReplayWithDifferentIntentFailsClosedWithoutConflict()
+      throws Exception {
+    TransferCommand storedCommand = new TransferCommand(sourceId, destinationId, 40_00L, "DOP");
+    String key = "tra-dangling-mismatch";
+    UUID danglingOperationId = UUID.randomUUID();
+    entities.persist(
+        new TransferOperationIdempotency(
+            key,
+            danglingOperationId,
+            TransferService.requestHash(storedCommand),
+            TransferOperationOutcome.CONFIRMED,
+            sourceId,
+            null,
+            "direct",
+            40_00L,
+            "DOP"));
+    entities.flush();
+    Map<String, Object> before = intentRow(key);
+
+    postTransfer(key, sourceActor.subject(), 50_00L)
+        .andExpect(status().isInternalServerError())
+        .andExpect(jsonPath("$.operationId").doesNotExist());
+
+    assertThat(appender.list).hasSize(1);
+    ILoggingEvent event = appender.list.get(0);
+    assertThat(event.getLevel()).isEqualTo(Level.WARN);
+    assertThat(event.getLoggerName()).isEqualTo(TransferService.class.getName());
+    assertThat(event.getFormattedMessage())
+        .isEqualTo("transfer.recovery.confirmed_operation_missing");
+    assertThat(event.getArgumentArray()).isNullOrEmpty();
+    assertThat(event.getThrowableProxy()).isNull();
+    assertThat(event.getFormattedMessage())
+        .doesNotContain(
+            key,
+            danglingOperationId.toString(),
+            sourceActor.subject(),
+            sourceId.toString(),
+            "4000",
+            "5000",
+            "DOP");
+
+    entities.flush();
+    assertThat(intentRow(key)).isEqualTo(before);
+    assertThat(
+            count(
+                "select count(*) from audit_events where action = 'TRANSFER_CONFLICT'"
+                    + " and resource_id = ?",
+                key))
+        .isZero();
+    assertThat(count("select count(*) from audit_events where resource_id = ?", key)).isZero();
+    assertNoNewTransferEffects();
+  }
+
+  /**
+   * H-02 beneficiary special case: without the usage snapshot the beneficiary owner cannot be
+   * authorized, so the persisted row stays an ordinary 403. The anomaly is not disclosed and the
+   * guard, which runs after authorization, is intentionally not reached.
+   */
+  @Test
+  void confirmedDanglingBeneficiaryOperationWithoutUsageStaysForbidden() {
+    UUID beneficiaryId = UUID.randomUUID();
+    TransferCommand command = new TransferCommand(sourceId, null, beneficiaryId, 40_00L, "DOP");
+    String key = "tra-dangling-beneficiary";
+    entities.persist(
+        new TransferOperationIdempotency(
+            key,
+            UUID.randomUUID(),
+            TransferService.requestHash(command),
+            TransferOperationOutcome.CONFIRMED,
+            sourceId,
+            beneficiaryId,
+            "beneficiary-transfer",
+            40_00L,
+            "DOP"));
+    entities.flush();
+    Map<String, Object> before = intentRow(key);
+
+    assertThatThrownBy(() -> transfers.transfer(command, key, sourceActor))
+        .isInstanceOf(TransferOperationException.class)
+        .matches(
+            e ->
+                ((TransferOperationException) e).getKind()
+                    == TransferOperationException.Kind.FORBIDDEN);
+
+    entities.flush();
+    assertThat(intentRow(key)).isEqualTo(before);
+    assertThat(count("select count(*) from transfer_beneficiary_usage")).isZero();
+    assertThat(count("select count(*) from audit_events where resource_id = ?", key)).isZero();
+    assertThat(appender.list).isEmpty();
+    assertNoNewTransferEffects();
+  }
+
+  /**
    * GET correlacionado sobre una fila sin referencia de operación: la consulta no llega al
    * repositorio de operaciones con un id nulo (lo que produciría una excepción no controlada),
    * respeta la autorización vigente sobre la fuente persistida y devuelve el 404 del contrato
@@ -446,6 +663,36 @@ class TransferReplayAuthorizationTest {
 
     assertThat(replayed.created()).isFalse();
     assertThat(replayed.operationId()).isEqualTo(operationId);
+  }
+
+  private org.springframework.test.web.servlet.ResultActions postTransfer(
+      String key, String actorHeader, long amountMinorUnits) throws Exception {
+    return mvc.perform(
+        post("/api/v1/transfers")
+            .contentType(MediaType.APPLICATION_JSON)
+            .content(
+                "{\"sourceAccountId\":\""
+                    + sourceId
+                    + "\",\"destinationAccountId\":\""
+                    + destinationId
+                    + "\",\"amountMinorUnits\":"
+                    + amountMinorUnits
+                    + ",\"currency\":\"DOP\"}")
+            .header("Idempotency-Key", key)
+            .header("X-Actor-Id", actorHeader));
+  }
+
+  private void assertNoNewTransferEffects() {
+    assertThat(count("select count(*) from financial_operations where operation_type = 'TRANSFER'"))
+        .isZero();
+    assertThat(
+            count(
+                "select count(*) from movements m join financial_operations o"
+                    + " on o.id = m.operation_id where o.operation_type = 'TRANSFER'"))
+        .isZero();
+    assertThat(count("select count(*) from transfer_beneficiary_usage")).isZero();
+    assertThat(balanceOf(sourceId)).isEqualTo(100_00L);
+    assertThat(balanceOf(destinationId)).isZero();
   }
 
   private UUID saveBeneficiary(String key) {

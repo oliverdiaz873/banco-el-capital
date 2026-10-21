@@ -10,6 +10,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import java.util.Optional;
@@ -96,6 +97,20 @@ class TransferServiceTest {
     when(authorization.decideTransfer(actor, "holder-source"))
         .thenReturn(AuthorizationDecision.allow());
     when(idempotency.findById("k1")).thenReturn(Optional.empty());
+  }
+
+  private void confirmedOperationExists(UUID operationId) {
+    when(operations.findById(operationId))
+        .thenReturn(
+            Optional.of(
+                new FinancialOperation(
+                    operationId,
+                    FinancialOperationType.TRANSFER,
+                    "holder-source",
+                    sourceId,
+                    10_00L,
+                    "DOP",
+                    FinancialOperationStatus.CONFIRMED)));
   }
 
   private void appliedLegs() {
@@ -288,6 +303,7 @@ class TransferServiceTest {
   void secondLegRefusalReplaysCommittedWinnerInsteadOfPersistingRejection() {
     UUID winnerId = UUID.randomUUID();
     String hash = TransferService.requestHash(command);
+    confirmedOperationExists(winnerId);
     when(lookup.findHolderCustomerId(sourceId)).thenReturn(Optional.of("holder-source"));
     when(lookup.findHolderCustomerId(destinationId)).thenReturn(Optional.of("holder-dest"));
     when(authorization.decideTransfer(actor, "holder-source"))
@@ -322,6 +338,8 @@ class TransferServiceTest {
 
   @Test
   void secondLegRefusalConflictsWhenWinnerHashDiffers() {
+    UUID winnerId = UUID.randomUUID();
+    confirmedOperationExists(winnerId);
     when(lookup.findHolderCustomerId(sourceId)).thenReturn(Optional.of("holder-source"));
     when(lookup.findHolderCustomerId(destinationId)).thenReturn(Optional.of("holder-dest"));
     when(authorization.decideTransfer(actor, "holder-source"))
@@ -329,7 +347,7 @@ class TransferServiceTest {
     var winner =
         new TransferOperationIdempotency(
             "k1",
-            UUID.randomUUID(),
+            winnerId,
             "other-hash",
             TransferOperationOutcome.CONFIRMED,
             sourceId,
@@ -361,6 +379,7 @@ class TransferServiceTest {
   void freshRejectionCollisionReplaysLateWinnerInsteadOfLeaking() {
     UUID winnerId = UUID.randomUUID();
     String hash = TransferService.requestHash(command);
+    confirmedOperationExists(winnerId);
     when(lookup.findHolderCustomerId(sourceId)).thenReturn(Optional.of("holder-source"));
     when(lookup.findHolderCustomerId(destinationId)).thenReturn(Optional.of("holder-dest"));
     when(authorization.decideTransfer(actor, "holder-source"))
@@ -399,6 +418,8 @@ class TransferServiceTest {
 
   @Test
   void freshRejectionCollisionConflictsWhenLateWinnerHashDiffers() {
+    UUID winnerId = UUID.randomUUID();
+    confirmedOperationExists(winnerId);
     when(lookup.findHolderCustomerId(sourceId)).thenReturn(Optional.of("holder-source"));
     when(lookup.findHolderCustomerId(destinationId)).thenReturn(Optional.of("holder-dest"));
     when(authorization.decideTransfer(actor, "holder-source"))
@@ -406,7 +427,7 @@ class TransferServiceTest {
     var winner =
         new TransferOperationIdempotency(
             "k1",
-            UUID.randomUUID(),
+            winnerId,
             "other-hash",
             TransferOperationOutcome.CONFIRMED,
             sourceId,
@@ -452,9 +473,6 @@ class TransferServiceTest {
                     == TransferOperationException.Kind.FORBIDDEN);
 
     var anonymous = new AuthenticatedActor(null, Set.of());
-    when(authorization.decideTransfer(anonymous, "holder-source"))
-        .thenReturn(AuthorizationDecision.deny("unauthenticated actor"));
-
     assertThatThrownBy(() -> service.transfer(command, "k1", anonymous))
         .isInstanceOf(TransferOperationException.class)
         .matches(
@@ -463,6 +481,79 @@ class TransferServiceTest {
                     == TransferOperationException.Kind.UNAUTHENTICATED);
     verify(operations, never()).save(any());
     verify(audit, never()).record(any());
+  }
+
+  @Test
+  void rejectsNullActorBeforeAnyLookupOrWrite() {
+    assertThatThrownBy(() -> service.transfer(command, "k1", null))
+        .isInstanceOf(TransferOperationException.class)
+        .matches(
+            e ->
+                ((TransferOperationException) e).getKind()
+                    == TransferOperationException.Kind.UNAUTHENTICATED);
+
+    verifyNoInteractions(
+        lookup,
+        idempotency,
+        operations,
+        movements,
+        authorization,
+        audit,
+        beneficiaries,
+        usage,
+        debits,
+        credits,
+        transactionManager);
+  }
+
+  @Test
+  void rejectsNullActorSubjectBeforeAnyLookupOrWrite() {
+    var anonymous = new AuthenticatedActor(null, Set.of());
+
+    assertThatThrownBy(() -> service.transfer(command, "k1", anonymous))
+        .isInstanceOf(TransferOperationException.class)
+        .matches(
+            e ->
+                ((TransferOperationException) e).getKind()
+                    == TransferOperationException.Kind.UNAUTHENTICATED);
+
+    verifyNoInteractions(
+        lookup,
+        idempotency,
+        operations,
+        movements,
+        authorization,
+        audit,
+        beneficiaries,
+        usage,
+        debits,
+        credits,
+        transactionManager);
+  }
+
+  @Test
+  void rejectsBlankActorSubjectBeforeAnyLookupOrWrite() {
+    var blank = new AuthenticatedActor("   ", Set.of());
+
+    assertThatThrownBy(() -> service.transfer(command, "k1", blank))
+        .isInstanceOf(TransferOperationException.class)
+        .matches(
+            e ->
+                ((TransferOperationException) e).getKind()
+                    == TransferOperationException.Kind.UNAUTHENTICATED);
+
+    verifyNoInteractions(
+        lookup,
+        idempotency,
+        operations,
+        movements,
+        authorization,
+        audit,
+        beneficiaries,
+        usage,
+        debits,
+        credits,
+        transactionManager);
   }
 
   @Test
@@ -479,6 +570,7 @@ class TransferServiceTest {
   void replaysSameKeyWithoutNewEffects() {
     String hash = TransferService.requestHash(command);
     UUID operationId = UUID.randomUUID();
+    confirmedOperationExists(operationId);
     when(lookup.findHolderCustomerId(sourceId)).thenReturn(Optional.of("holder-source"));
     when(authorization.decideTransfer(actor, "holder-source"))
         .thenReturn(AuthorizationDecision.allow());
@@ -509,6 +601,8 @@ class TransferServiceTest {
 
   @Test
   void conflictsOnSameKeyWithDifferentPayload() {
+    UUID winnerId = UUID.randomUUID();
+    confirmedOperationExists(winnerId);
     when(lookup.findHolderCustomerId(sourceId)).thenReturn(Optional.of("holder-source"));
     when(authorization.decideTransfer(actor, "holder-source"))
         .thenReturn(AuthorizationDecision.allow());
@@ -517,7 +611,7 @@ class TransferServiceTest {
             Optional.of(
                 new TransferOperationIdempotency(
                     "k1",
-                    UUID.randomUUID(),
+                    winnerId,
                     "other-hash",
                     TransferOperationOutcome.CONFIRMED,
                     sourceId,
@@ -555,6 +649,7 @@ class TransferServiceTest {
   void postLockRecheckReplaysCommittedWinnerWithoutWriting() {
     UUID winnerId = UUID.randomUUID();
     String hash = TransferService.requestHash(command);
+    confirmedOperationExists(winnerId);
     when(lookup.findHolderCustomerId(sourceId)).thenReturn(Optional.of("holder-source"));
     when(lookup.findHolderCustomerId(destinationId)).thenReturn(Optional.of("holder-dest"));
     when(authorization.decideTransfer(actor, "holder-source"))
