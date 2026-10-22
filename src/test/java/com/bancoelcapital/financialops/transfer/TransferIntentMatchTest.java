@@ -1,6 +1,8 @@
 package com.bancoelcapital.financialops.transfer;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import java.util.UUID;
 
@@ -25,6 +27,7 @@ class TransferIntentMatchTest {
         TransferOperationOutcome.REJECTED,
         command.sourceAccountId(),
         null,
+        command.destinationAccountId(),
         "direct",
         command.amountMinorUnits(),
         command.currency());
@@ -38,6 +41,7 @@ class TransferIntentMatchTest {
         TransferOperationOutcome.REJECTED,
         command.sourceAccountId(),
         command.beneficiaryId(),
+        null,
         "beneficiary-transfer",
         command.amountMinorUnits(),
         command.currency());
@@ -55,6 +59,39 @@ class TransferIntentMatchTest {
     var command = new TransferCommand(SOURCE, null, BENEFICIARY, 1000L, "DOP");
     assertThat(TransferService.matchesIntent(storedBeneficiary(command), command, hashOf(command)))
         .isTrue();
+  }
+
+  @Test
+  void directDestinationEvidenceMismatchIsFalseEvenWithMatchingHash() {
+    var command = new TransferCommand(SOURCE, DESTINATION, 1000L, "DOP");
+    var stored =
+        new TransferOperationIdempotency(
+            "k",
+            UUID.randomUUID(),
+            hashOf(command),
+            TransferOperationOutcome.REJECTED,
+            SOURCE,
+            null,
+            UUID.randomUUID(),
+            "direct",
+            1000L,
+            "DOP");
+    assertThat(TransferService.matchesIntent(stored, command, hashOf(command))).isFalse();
+  }
+
+  @Test
+  void legacyDirectRowWithoutDestinationKeepsHashOnlyPolicy() {
+    var command = new TransferCommand(SOURCE, DESTINATION, 1000L, "DOP");
+    TransferOperationIdempotency legacy = mock(TransferOperationIdempotency.class);
+    when(legacy.getRequestHash()).thenReturn(hashOf(command));
+    when(legacy.getPath()).thenReturn("direct");
+    when(legacy.getSourceAccountId()).thenReturn(SOURCE);
+    when(legacy.getAmountMinorUnits()).thenReturn(1000L);
+    when(legacy.getCurrency()).thenReturn("DOP");
+    when(legacy.getDestinationAccountId()).thenReturn(null);
+
+    assertThat(TransferService.matchesIntent(legacy, command, hashOf(command))).isTrue();
+    assertThat(TransferService.matchesIntent(legacy, command, "0".repeat(64))).isFalse();
   }
 
   @Test
@@ -116,6 +153,7 @@ class TransferIntentMatchTest {
             UUID.randomUUID(),
             hashOf(command),
             TransferOperationOutcome.REJECTED,
+            null,
             null,
             null,
             null,

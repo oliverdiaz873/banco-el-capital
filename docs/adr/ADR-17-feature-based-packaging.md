@@ -32,14 +32,21 @@ com/bancoelcapital/
 │   ├── core/
 │   ├── deposit/
 │   │   └── web/
-│   └── withdrawal/
+│   ├── withdrawal/
+│   │   └── web/
+│   ├── transfer/
+│   │   └── web/
+│   └── history/
 │       └── web/
 ├── identity/
 ├── audit/
 │   ├── api/
 │   └── internal/
-├── app/
-└── beneficiaries/
+├── beneficiaries/
+│   ├── api/
+│   ├── internal/
+│   └── web/
+└── app/
 ```
 
 Packaging conventions:

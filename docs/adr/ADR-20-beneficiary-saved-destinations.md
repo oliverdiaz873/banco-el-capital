@@ -198,6 +198,8 @@ No existing ADR is modified by this decision.
 
 Accepted - formally approved by human review with P1-P8 and precisions A-C.
 
+Implementation note (Phases 3): migration V10 now exists and creates the two tables described below; later phases added the ADR-21 read-only `beneficiaries.api` resolver and V11 transfer evidence. The conceptual/OPEN wording in this ADR is retained as design history, not as a claim that the schema is absent.
+
 ## Notes
 
 - Compatible with ADR-01 through ADR-19 at creation time. Human-approved

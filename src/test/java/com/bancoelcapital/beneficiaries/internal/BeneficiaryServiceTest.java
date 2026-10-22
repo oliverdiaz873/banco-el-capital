@@ -238,7 +238,7 @@ class BeneficiaryServiceTest {
     when(authorization.decideManageBeneficiary(actor, "owner-1"))
         .thenReturn(AuthorizationDecision.allow());
     UUID id = UUID.randomUUID();
-    when(beneficiaries.findByIdAndOwnerCustomerId(id, "owner-1")).thenReturn(Optional.empty());
+    when(beneficiaries.findViewAndOwner(id, "owner-1")).thenReturn(Optional.empty());
     when(beneficiaries.findByOwnerCustomerIdOrderByCreatedAtAsc("owner-1")).thenReturn(List.of());
 
     assertThat(service.findForOwner(id, actor)).isEmpty();

@@ -21,6 +21,19 @@ Transfer proves the first multi-row invariant: concurrent transfers MUST NOT
 double-spend the source balance, MUST never produce a negative balance, and MUST
 never deadlock or partially apply (debit without credit).
 
+## Implementation Status and Corrections (Phases 1-4.3)
+
+This document began as a Phase 0/T0 design. The following facts now supersede any older wording below that conflicts with them:
+
+- Beneficiary transfers ARE implemented (Phase 4) with an XOR request contract. The direct path remains fully supported. `TransferCommand` carries optional `beneficiaryId`; the beneficiary destination is always server-resolved and the client-supplied destination is unused on that path.
+- Migrations V8 (transfer foundation), V10 (beneficiaries), V11 (beneficiary intent/usage evidence), V12 (CONFIRMED requires `operation_id`) and V13 (direct destination intent evidence) exist. There is no longer a "future V8/V11" or "conceptual V10".
+- Authorization is two-phase. Phase 1 outside `writeTx` is a fast path and may perform a non-decisive idempotency lookup for an existing key. Phase 2 inside `writeTx` re-reads the authoritative source holder, calls `decideTransfer`, re-reads the owner-scoped beneficiary projection, calls `decideManageBeneficiary`, computes the effective destination and invokes the UUID-ordered account legs. The decisive idempotency re-check runs after both account locks are held by those legs and before any operation/movement/idempotency/audit write: a committed winner throws and rolls back the tentative legs. After both locks are held, the beneficiary's owner, destination and destination currency are re-read and compared with the phase-2 snapshot.
+- Source authorization failure in either phase, including an unknown source inside phase 2, returns the same `403` body and persists no operation, idempotency row, rejection audit or movement. A missing/foreign beneficiary after source authorization is a business `422` with persisted intent evidence, not a source `403`.
+- `AccountLookupService` and the beneficiary resolution path use projection reads for authoritative holder/beneficiary checks. Loading a managed `Account` or `Beneficiary` entity before the locked legs could otherwise let stale first-level-cache state lose a concurrent committed update or hide a post-lock change.
+- The service-owned `writeTx` pins `READ_COMMITTED` and uses `REQUIRED`: it joins an ambient caller transaction, so the caller can determine effective isolation and final rollback; a successful inner return does not guarantee a commit. Three paths use `REQUIRES_NEW`: (a) a second-leg refusal persists its rejection in a fresh balance-free write transaction so an outer rollback-only caller cannot suppress it; (b) conflict evidence is written in a fresh write transaction; (c) winner reload after a failed write runs in a fresh read-only transaction because PostgreSQL aborts the whole transaction after a constraint violation. Ordinary business rejections before any leg run inside `writeTx` and therefore commit or roll back with the caller.
+- The intent hash uses a path discriminator: direct keeps `source|destination|amount|currency`; beneficiary uses `beneficiary-transfer|source|beneficiaryId|amount|currency`. V12 enforces `outcome <> 'CONFIRMED' OR operation_id IS NOT NULL` and aborts with a preflight error if historical rows violate it, without repair. V13 adds `destination_account_id` to `transfer_operation_idempotency` (never to `financial_operations`) with a validated scope check and a `NOT VALID` direct-required check; no backfill. New direct `CONFIRMED`/`REJECTED` rows persist the supplied destination, beneficiary rows keep it `NULL`, and replay compares it when present while pre-V13 rows remain hash-only.
+- The acceptance checkboxes at the end are historical. Phase 4.3 does not claim a global acceptance beyond the tests and evidence reported for the implemented scope.
+
 ## Scope
 
 In scope: single-currency transfer validation, sufficient-funds invariant on the
@@ -28,40 +41,52 @@ source, deterministic lock ordering between the two accounts, dedicated use of t
 Accounts-owned credit and debit contracts, transfer lifecycle and idempotency in a
 separate namespace, single-transaction atomicity over two balances, minimal audit,
 conceptual API direction, invariant-based testing, and H2-transitory risk
-documentation.
+documentation. Direct and saved-beneficiary transfers are both implemented;
+beneficiary ownership, resolution and post-lock revalidation are included per
+ADR-21.
 
-Out of scope: beneficiaries and third-party alias resolution, cross-currency and FX,
-fees, overdraft and limits, compensation/reversal execution, account lifecycle
-transitions (block/close), formal ledger/double-entry, event sourcing, sagas,
-Kafka/Redis/microservices/distributed transactions, real authentication
-(JWT/OAuth/Spring Security), PostgreSQL/Testcontainers validation work beyond the
-follow-up discipline, and advanced observability. If a Transfer decision prepares
-Beneficiary Transfer, the relationship is noted without designing beneficiaries.
+Out of scope: cross-currency and FX, fees, overdraft and limits, compensation/reversal
+execution, account lifecycle transitions (block/close), formal ledger/double-entry,
+event sourcing, sagas, Kafka/Redis/microservices/distributed transactions, real
+authentication (JWT/OAuth/Spring Security), and advanced observability.
 
 ## Actors, Source and Destination
 
 - Actor: authenticated actor under the current stub (self or `BANK_EMPLOYEE` via
-  `X-Actor-Id`). Authorization is evaluated against the source holder only
-  (T0 decision, approved): the request carries no holder identity; both holders are
-  server-resolved from the accounts.
+  `X-Actor-Id`). Authorization is always evaluated against the source holder;
+  on the beneficiary path, `decideManageBeneficiary` is additionally required
+  against the persisted beneficiary owner. The request carries no holder or
+  owner identity; both are server-resolved.
 - Source: account that owns the funds. MUST exist, MUST be `ACTIVE`, MUST have a
   currency equal to the operation currency, MUST have `available >= amount` at
-  confirmation time.
-- Destination: account that receives the funds. MUST exist, MUST be `ACTIVE`
-  (T0 decision, approved, transfer-scoped): `BLOCKED` and `CLOSED` destinations
-  reject deterministically. This verdict does not change ADR-03 generally; it is
-  the transfer-scoped symmetric rule already used by Deposit and Withdrawal.
+  confirmation time. If the actor cannot prove source authority, the request is
+  a uniform `403` with no persisted evidence, whether the source is unknown or
+  owned by somebody else.
+- Destination (direct path): account that receives the funds. MUST exist, MUST
+  be `ACTIVE` (T0 decision, approved, transfer-scoped): `BLOCKED` and `CLOSED`
+  destinations reject deterministically. This verdict does not change ADR-03
+  generally; it is the transfer-scoped symmetric rule already used by Deposit
+  and Withdrawal.
+- Destination (beneficiary path): resolved exclusively from the saved
+  beneficiary owned by the actor. Missing/foreign beneficiary is a generic
+  business `422` after source authorization; the resolved destination is then
+  checked under the same operability/currency/funds rules.
 - Source and destination MUST be distinct accounts (`source != destination`).
-  Self-transfer to the same account id is a deterministic business rejection.
+  Self-transfer to the same account id is a deterministic business rejection
+  once source authorization succeeds.
 
 ## Preconditions and Business Rules
 
 A transfer confirms only when all hold:
 
 - source and destination ids are present and distinct;
-- both accounts exist (server-resolved; unknown ids reject deterministically);
-- actor is authorized on the source holder under the current stub
-  (`actor == source holder` or `BANK_EMPLOYEE`);
+- the source exists and the actor is authorized on its holder under the current
+  stub (`actor == source holder` or `BANK_EMPLOYEE`). Failure is a uniform
+  `403` with no persisted evidence, not a `REJECTED` operation;
+- the destination exists, checked only after source authorization advances
+  (unknown destination is a deterministic `422` with persisted intent);
+- on the beneficiary path, `decideManageBeneficiary` also allows the persisted
+  beneficiary owner;
 - both accounts are operable under transfer scope (`ACTIVE`; `BLOCKED`/`CLOSED`
   on either side reject);
 - amount is a positive minor-units value (`long`, `> 0`);
@@ -86,10 +111,12 @@ Transfer uses the ADR-04 lifecycle without new states:
 
 - `CONFIRMED`: committed operation with one `DEBIT` movement on the source and
   one `CREDIT` movement on the destination, both balances updated, and audit.
-- `REJECTED`: deterministic business refusal (unknown source/destination,
-  same-account, inoperable state on either side, currency mismatch, invalid
-  amount, insufficient funds, unauthorized actor); no movement on either side, no
-  balance change, rejection audit.
+- `REJECTED`: deterministic business refusal reached after source authorization
+  (unknown destination, same-account, inoperable state on either side, currency
+  mismatch, invalid amount, insufficient funds, missing/foreign beneficiary); no
+  movement on either side, no balance change, rejection audit and intent
+  evidence. Source authorization failure is NOT a `REJECTED` operation: it is a
+  uniform `403` with no persisted evidence.
 - `FAILED`: used only when the system determines a technical failure occurred
   and the operation has no financial effect (for example arithmetic overflow via
   `addExact`/`subtractExact`); no movement, no balance change, no fabricated
@@ -120,7 +147,9 @@ the idempotency query that ADR-04 already requires. No ADR-04 change.
   Advantage: existing financial representation is preserved and MVP scope is
   reduced. Trade-off: obtaining the destination requires querying the linked
   movements instead of reading it directly from `FinancialOperation`. No
-  `destination_account_id` column is introduced in MVP.
+  `destination_account_id` column is introduced in `financial_operations`;
+  V13 adds one only to `transfer_operation_idempotency` as replay intent
+  evidence.
 - Both movements belong to the same operation and represent one financial unit.
   Two independent operations (one debit plus one credit) are forbidden per
   ADR-05. No `DEBITED`/`CREDITED`/`PARTIALLY_COMPLETED` states. Confusing
@@ -165,7 +194,12 @@ uniqueness and integrity errors inside the same `writeTx`, with winner reload
 in a fresh read transaction afterwards.
 
 A rejected transfer persists operation, idempotency, and rejection audit with no
-movement and no balance change on either side.
+movement and no balance change on either side. A rejection decided before any
+leg (same-account, unknown account, or a first-lock refusal) is written inside
+the main `writeTx` and follows the caller's commit/rollback. If the second leg
+refuses after the first leg mutated a balance, the main `writeTx` rolls back and
+the rejection is persisted in a fresh balance-free `writeTx` (`REQUIRES_NEW`), so
+an outer rollback-only caller cannot suppress the deterministic evidence.
 
 Failure between debit and credit MUST revert all effects (T0 precision,
 approved). Because debit and credit are applied inside one local transaction,
@@ -217,8 +251,11 @@ Three disjoint outcomes, following Deposit/Withdrawal discipline:
   authorized under the ADR-21 recovery rules. If the persisted source is
   unknown or unresolvable, POST recovery fails closed with `403 FORBIDDEN`
   without replaying; possession of the key and payload is not authorization.
-  Examples: unknown source/destination, same-account, inoperable either side,
-  currency mismatch, invalid amount, insufficient funds, unauthorized actor.
+  Examples after source authorization succeeds: unknown destination,
+  same-account, inoperable either side, currency mismatch, invalid amount,
+  insufficient funds, missing/foreign beneficiary. A source that is unknown or
+  not authorized is NOT a `REJECTED` operation: it is a uniform `403` that
+  persists no operation, idempotency row, rejection audit or movement.
 - `FAILED`: determined technical failure with no financial effect, committed as
   operation + idempotency `FAILED` only when the system positively determines
   no effect occurred (for example `ArithmeticException` from
@@ -232,7 +269,7 @@ Three disjoint outcomes, following Deposit/Withdrawal discipline:
 ## Idempotency, Replay and Conflicts
 
 Same discipline as Deposit/Withdrawal, separate transfer namespace
-(`transfer_operation_idempotency`, to be created by a future migration — no
+(`transfer_operation_idempotency`, created by V8 and extended by V11/V12/V13; no
 migration in T0):
 
 - `Idempotency-Key` required; canonical request hash defined exactly as follows
@@ -246,12 +283,16 @@ migration in T0):
 
 ```text
 source-lowercase-uuid|destination-lowercase-uuid|amount-base10|currency-upper
+beneficiary-transfer|source-lowercase-uuid|beneficiary-lowercase-uuid|amount-base10|currency-upper
 ```
 
   Bytes: UTF-8 encoding of that string. Hash: SHA-256 over those bytes, hex
-  encoded lowercase (64 chars), mirroring `account|amount|currency` discipline
-  of Deposit/Withdrawal. The same logical intent MUST produce the same hash on
-  every retry; any deviation in normalization is a conflict risk, not a replay.
+  encoded lowercase (64 chars). The direct path keeps its existing shape; the
+  beneficiary path adds the mandatory discriminator so a direct intent and a
+  beneficiary intent can never share an identity. The resolved beneficiary
+  destination is execution evidence, not intent identity. The same logical
+  intent MUST produce the same hash on every retry; any deviation in
+  normalization is a conflict risk, not a replay.
 - Authorized same key plus same payload on a confirmed transfer replays without
   new effects and without new audit of the original effect (`200`,
   `created=false`).
@@ -269,9 +310,11 @@ source-lowercase-uuid|destination-lowercase-uuid|amount-base10|currency-upper
   a new key for recovery is forbidden because it would create a second
   transfer.
 - Post-lock idempotency re-check is mandatory and occurs only after BOTH row
-  locks are held: if a concurrent same-key winner committed while waiting for
-  either lock, the waiter replays it instead of duplicating. Winner reload after
-  a uniqueness race runs in a fresh read transaction (PostgreSQL aborts the
+  locks are held, and after the two legs have been invoked: their tentative
+  effects are rolled back if a committed winner is found, then the waiter
+  replays it instead of duplicating. The second-leg path also re-checks
+  idempotency before converting a refusal into a fresh rejection. Winner reload
+  after a uniqueness race runs in a fresh read transaction (PostgreSQL aborts the
   whole transaction on any constraint violation, so a same-transaction reload
   could never succeed there).
 - Recovery: the outcome query (`GET /api/v1/transfer-operations/{key}`
@@ -316,9 +359,10 @@ Rules:
 2. Enter the single outer `writeTx`; invoke the two contracts in UUID ascending
    order and hold both row locks until outer commit — locks are never released
    between legs.
-3. Post-lock idempotency re-check only after BOTH locks are held: if a
-   concurrent same-key winner committed while waiting for either lock, replay
-   it instead of duplicating.
+3. Post-lock idempotency re-check only after BOTH locks are held and both leg
+   calls have returned: if a concurrent same-key winner committed while waiting
+   for either lock, throw and roll back the tentative effects, then replay the
+   winner instead of duplicating it.
 4. The confirmation decision (`CONFIRMED` versus `REJECTED`) is taken only after
    BOTH contract results are known. Per-leg checks (existence, operability,
    currency, funds) each occur under their own row lock and stay valid because
@@ -367,13 +411,21 @@ participants are out of scope.
 Current stub is retained, no new auth design (ADR-09):
 
 - authenticated actor required (`X-Actor-Id` present and non-blank);
-- authorization is evaluated on the source holder only: `actor == source
-  holder` or `BANK_EMPLOYEE` role; the destination holder never authorizes
-  (consistent with Option A: `operation.account_id` = source);
-- both holders are server-resolved from the accounts; the request carries no
-  holder identity, so a mismatched holder cannot satisfy auth;
-- unknown account ids reject deterministically before auth distinctions leak
-  existence (UUIDs unguessable; same pattern as Deposit/Withdrawal);
+- authorization always requires source authority: `actor == source holder` or
+  `BANK_EMPLOYEE` role. On the beneficiary path ADR-21 additionally requires
+  `decideManageBeneficiary` against the persisted beneficiary owner. The
+  destination holder never authorizes (consistent with Option A:
+  `operation.account_id` = source);
+- both holders and the beneficiary owner are server-resolved; the request
+  carries no holder/owner identity, so a mismatched holder cannot satisfy auth;
+- an unknown source and a foreign source return the same `403` body, with no
+  operation, idempotency row, rejection audit or movements. Once source
+  authority is proven, deterministic business failures (including an unknown
+  destination or missing/foreign beneficiary) remain `422` with persisted
+  intent evidence;
+- authorization is evaluated twice: a phase-1 fast path and an authoritative
+  phase-2 re-evaluation inside `writeTx` before any financial effect. A
+  beneficiary is re-read again after both account locks are held;
 - outcome query (`GET /api/v1/transfer-operations/{key}` direction) MUST be
   authorized against the server-resolved source holder and guarded by the
   request hash; unauthorized callers receive `401`/`403`/`404` without learning
@@ -450,8 +502,9 @@ Invariant-based, mirroring Deposit/Withdrawal layers plus two-row contention:
       `account_id == sourceAccountId`; exactly one `CREDIT` movement with
       `account_id == destinationAccountId`; both movements carry the same
       `operation_id` as the single `TRANSFER` operation; origin and
-      destination cannot be confused; no `destination_account_id` column and
-      no schema migration are introduced for this MVP.
+      destination cannot be confused; no `destination_account_id` column is
+      introduced in `financial_operations` (V13 adds it only to the transfer
+      idempotency row).
 - [ ] Same `Idempotency-Key` plus same payload replays without new effects and
       without new audit when recovery authorization succeeds; otherwise it
       fails closed with `403 FORBIDDEN` per ADR-21, without replay and without
@@ -481,8 +534,9 @@ of decided silently):
   Withdrawal). Kept here for traceability.
 - P2. Destination `BLOCKED`/`CLOSED` — DECIDED in T0 approval (reject,
   transfer-scoped, ADR-03 unchanged). Kept here for traceability.
-- P3. Source-only authorization — DECIDED in T0 approval. Kept here for
-  traceability.
+- P3. Base authorization on the source holder — DECIDED in T0 approval and
+  kept for traceability. ADR-21 (Accepted) adds beneficiary-owner authorization
+  on the beneficiary path; that extension is implemented in Phase 4.
 - P4. UUID-ordered lock acquisition — DECIDED in T0 approval. Kept here for
   traceability.
 - P5. Retention/cleanup policy for `transfer_operation_idempotency` and audit

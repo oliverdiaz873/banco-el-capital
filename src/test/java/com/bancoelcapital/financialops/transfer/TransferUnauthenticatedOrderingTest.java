@@ -2,6 +2,7 @@ package com.bancoelcapital.financialops.transfer;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import java.util.Set;
@@ -142,25 +143,53 @@ class TransferUnauthenticatedOrderingTest {
     String key = "tuo-foreign-" + tag;
 
     postTransfer(sourceOf(sourceId), destinationOf(destinationId), key, destinationActor.subject())
-        .andExpect(status().isForbidden());
+        .andExpect(status().isForbidden())
+        .andExpect(jsonPath("$.error").value("transfer not authorized"));
 
     assertNoTransferEvidence(key);
   }
 
   @Test
-  void authenticatedUnknownSourceStillReturns422Rejected() throws Exception {
+  void authenticatedUnknownSourceReturnsTheSame403WithoutEffects() throws Exception {
     String key = "tuo-auth-unknown-" + tag;
 
     postTransfer(
             sourceOf(UUID.randomUUID()), destinationOf(destinationId), key, sourceActor.subject())
-        .andExpect(status().isUnprocessableEntity());
+        .andExpect(status().isForbidden())
+        .andExpect(jsonPath("$.error").value("transfer not authorized"));
 
-    assertThat(idempotencyOutcome(key)).isEqualTo("REJECTED");
-    assertThat(transferOperationCount()).isZero();
-    assertThat(movementCount()).isZero();
-    assertThat(auditCount(key)).isEqualTo(1);
-    assertThat(balanceOf(sourceId)).isEqualTo(100_00L);
-    assertThat(balanceOf(destinationId)).isZero();
+    assertNoTransferEvidence(key);
+  }
+
+  @Test
+  void unauthorizedSourcePrecedesUnknownDestinationBusinessRejection() throws Exception {
+    String key = "tuo-foreign-unknown-dest-" + tag;
+
+    postTransfer(
+            sourceOf(sourceId), destinationOf(UUID.randomUUID()), key, destinationActor.subject())
+        .andExpect(status().isForbidden())
+        .andExpect(jsonPath("$.error").value("transfer not authorized"));
+
+    assertNoTransferEvidence(key);
+  }
+
+  @Test
+  void unauthorizedAttemptDoesNotPoisonTheKeyForALaterAuthorizedRequest() throws Exception {
+    String key = "tuo-key-reuse-" + tag;
+
+    postTransfer(sourceOf(sourceId), destinationOf(destinationId), key, destinationActor.subject())
+        .andExpect(status().isForbidden());
+    assertNoTransferEvidence(key);
+
+    postTransfer(sourceOf(sourceId), destinationOf(destinationId), key, sourceActor.subject())
+        .andExpect(status().isCreated());
+
+    assertThat(idempotencyOutcome(key)).isEqualTo("CONFIRMED");
+    assertThat(transferOperationCount()).isEqualTo(1);
+    assertThat(movementCount()).isEqualTo(2);
+    assertThat(auditCount(key)).isZero();
+    assertThat(balanceOf(sourceId)).isEqualTo(60_00L);
+    assertThat(balanceOf(destinationId)).isEqualTo(40_00L);
   }
 
   @Test

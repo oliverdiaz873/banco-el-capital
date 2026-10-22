@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
 
+import java.sql.Connection;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -16,6 +17,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -24,6 +27,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import com.bancoelcapital.accounts.api.AccountCreditCommand;
@@ -45,6 +49,7 @@ import com.bancoelcapital.customers.internal.CustomerCreationService;
 import com.bancoelcapital.financialops.deposit.DepositCommand;
 import com.bancoelcapital.financialops.deposit.DepositService;
 import com.bancoelcapital.identity.AuthenticatedActor;
+import com.bancoelcapital.identity.AuthorizationService;
 
 /**
  * H-1 regression proofs on H2: when the transfer call participates in an outer transaction, a
@@ -86,6 +91,8 @@ class TransferExternalTransactionRecoveryTest {
   @MockitoSpyBean AccountCreditService credits;
 
   @MockitoSpyBean AuditRecorder audit;
+
+  @MockitoSpyBean AuthorizationService authorization;
 
   String tag;
   UUID sourceId;
@@ -338,6 +345,77 @@ class TransferExternalTransactionRecoveryTest {
     assertThat(rejectionEntries.get(0).result()).isEqualTo("REJECTED");
     assertThat(rejectionEntries.get(0).details())
         .isEqualTo("destination account not operable for transfers");
+  }
+
+  @Test
+  void callerRollbackAfterSuccessfulTransferLeavesNoTransactionalEffects() {
+    String key = "text-caller-rollback-" + tag;
+    TransferResult result =
+        outer.execute(
+            status -> {
+              TransferResult confirmed =
+                  transfers.transfer(
+                      new TransferCommand(sourceId, destinationId, 40_00L, "DOP"),
+                      key,
+                      sourceActor);
+              status.setRollbackOnly();
+              return confirmed;
+            });
+
+    assertThat(result).isNotNull();
+    assertThat(result.created()).isTrue();
+    assertThat(
+            count(
+                "select count(*) from transfer_operation_idempotency where idempotency_key = ?",
+                key))
+        .isZero();
+    assertThat(
+            count(
+                "select count(*) from financial_operations where operation_type = 'TRANSFER'"
+                    + " and account_id = ?",
+                sourceId))
+        .isZero();
+    assertThat(
+            count(
+                "select count(*) from movements m join financial_operations o"
+                    + " on o.id = m.operation_id where o.operation_type = 'TRANSFER'"
+                    + " and o.account_id = ?",
+                sourceId))
+        .isZero();
+    assertThat(
+            count(
+                "select count(*) from audit_events where action = 'TRANSFER_CONFIRMED'"
+                    + " and resource_id = ?",
+                result.operationId().toString()))
+        .isZero();
+    assertThat(balanceOf(sourceId)).isEqualTo(100_00L);
+    assertThat(balanceOf(destinationId)).isZero();
+  }
+
+  @Test
+  void serviceManagedTransactionIsActiveAndPinsReadCommitted() {
+    AtomicInteger calls = new AtomicInteger();
+    AtomicBoolean active = new AtomicBoolean();
+    AtomicInteger isolation = new AtomicInteger(-1);
+    doAnswer(
+            invocation -> {
+              if (calls.incrementAndGet() == 2) {
+                active.set(TransactionSynchronizationManager.isActualTransactionActive());
+                isolation.set(
+                    TransactionSynchronizationManager.getCurrentTransactionIsolationLevel());
+              }
+              return invocation.callRealMethod();
+            })
+        .when(authorization)
+        .decideTransfer(any(), any());
+
+    transfers.transfer(
+        new TransferCommand(sourceId, destinationId, 40_00L, "DOP"),
+        "text-managed-" + tag,
+        sourceActor);
+
+    assertThat(active).isTrue();
+    assertThat(isolation.get()).isEqualTo(Connection.TRANSACTION_READ_COMMITTED);
   }
 
   private Map<String, Object> intentRow(String key) {

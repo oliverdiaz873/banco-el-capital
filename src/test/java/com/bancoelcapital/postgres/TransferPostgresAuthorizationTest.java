@@ -123,9 +123,39 @@ class TransferPostgresAuthorizationTest extends AbstractPostgresTest {
     String key = "tpa-foreign-" + tag;
 
     postTransfer(sourceId, destinationId, key, destinationActor.subject())
-        .andExpect(status().isForbidden());
+        .andExpect(status().isForbidden())
+        .andExpect(jsonPath("$.error").value("transfer not authorized"));
 
     assertNoTransferEvidence(key);
+  }
+
+  @Test
+  void authenticatedUnknownSourceReturnsSame403WithoutEffects() throws Exception {
+    String key = "tpa-auth-unknown-" + tag;
+
+    postTransfer(UUID.randomUUID(), destinationId, key, sourceActor.subject())
+        .andExpect(status().isForbidden())
+        .andExpect(jsonPath("$.error").value("transfer not authorized"));
+
+    assertNoTransferEvidence(key);
+  }
+
+  @Test
+  void unauthorizedAttemptDoesNotPoisonTheKeyForALaterAuthorizedRequest() throws Exception {
+    String key = "tpa-key-reuse-" + tag;
+
+    postTransfer(sourceId, destinationId, key, destinationActor.subject())
+        .andExpect(status().isForbidden());
+    assertNoTransferEvidence(key);
+
+    postTransfer(sourceId, destinationId, key, sourceActor.subject())
+        .andExpect(status().isCreated());
+
+    assertThat(idempotencyOutcome(key)).isEqualTo("CONFIRMED");
+    assertThat(transferOperationCount()).isEqualTo(1);
+    assertThat(movementCount()).isEqualTo(2);
+    assertThat(balanceOf(sourceId)).isEqualTo(60_00L);
+    assertThat(balanceOf(destinationId)).isEqualTo(40_00L);
   }
 
   @Test
@@ -198,11 +228,13 @@ class TransferPostgresAuthorizationTest extends AbstractPostgresTest {
     jdbc.update(
         "insert into transfer_operation_idempotency"
             + " (idempotency_key, operation_id, request_hash, outcome, source_account_id,"
-            + " beneficiary_id, path, amount_minor_units, currency, created_at)"
-            + " values (?, null, ?, 'CONFIRMED', ?, null, 'direct', ?, 'DOP', now())",
+            + " beneficiary_id, destination_account_id, path, amount_minor_units, currency,"
+            + " created_at)"
+            + " values (?, null, ?, 'REJECTED', ?, null, ?, 'direct', ?, 'DOP', now())",
         key,
         hash,
         sourceId,
+        destinationId,
         40_00L);
 
     mvc.perform(

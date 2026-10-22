@@ -155,28 +155,21 @@ public class TransferService {
     if (command.beneficiaryId() != null) {
       return transferViaBeneficiary(command, idempotencyKey, actor);
     }
-    if (command.sourceAccountId() != null
-        && command.sourceAccountId().equals(command.destinationAccountId())) {
-      return rejectOrRecover(
-          command, idempotencyKey, hash, actor, "source and destination must differ");
-    }
-    // Account identities are server-resolved: the client supplies only account UUIDs, never
-    // holders, so authorization cannot be satisfied with a mismatched holder.
-    // Account UUIDs are unguessable; unknown ids deterministically reject like the
-    // established "unknown holder" precedent instead of leaking through auth paths.
+    // H-04 option D: source authorization is proven before any deterministic business
+    // rejection is persisted or disclosed. An unknown source and a source owned by somebody
+    // else take the exact same path, body, and side-effect-free outcome. This also avoids
+    // consuming the idempotency key for an unauthorized attempt.
     Optional<String> sourceHolder = lookup.findHolderCustomerId(command.sourceAccountId());
     if (sourceHolder.isEmpty()) {
-      return rejectOrRecover(command, idempotencyKey, hash, actor, "unknown account");
-    }
-    Optional<String> destinationHolder =
-        lookup.findHolderCustomerId(command.destinationAccountId());
-    if (destinationHolder.isEmpty()) {
-      return rejectOrRecover(command, idempotencyKey, hash, actor, "unknown account");
+      throw sourceForbidden();
     }
     var decision = authorization.decideTransfer(actor, sourceHolder.get());
     if (!decision.allowed()) {
-      throw forbidden(decision.reason());
+      throw sourceForbidden();
     }
+    // Destination existence and same-account checks are deliberately deferred to phase two,
+    // after the write transaction re-evaluates source authority. Persisting a rejection from
+    // phase one would let an initial authorization substitute for the required revalidation.
     Optional<TransferOperationIdempotency> lateExisting = idempotency.findById(idempotencyKey);
     if (lateExisting.isPresent()) {
       return recoverExisting(lateExisting.get(), command, hash, idempotencyKey, actor);
@@ -185,27 +178,25 @@ public class TransferService {
   }
 
   /**
-   * Beneficiary-path transfer (ADR-21, P1a single-resolve slice). The client-supplied destination
-   * is never used: the destination comes exclusively from the owner-scoped server-side resolution.
-   * Both authorizations are required: source-holder transfer permission and beneficiary-owner
-   * management permission. Missing and foreign beneficiaries are indistinguishable.
+   * Beneficiary-path transfer (ADR-21). The client-supplied destination is never used: the
+   * destination comes exclusively from the owner-scoped server-side resolution. Both authorizations
+   * are required: source-holder transfer permission and beneficiary-owner management permission.
+   * Missing and foreign beneficiaries are indistinguishable.
    *
-   * <p>Race window (E5 deferred, NOT claimed here): the beneficiary is resolved once, outside the
-   * write transaction and without a beneficiary row lock. A beneficiary deleted after this
-   * resolution but before the transfer commits is not observed; the transfer may confirm on the
-   * validated snapshot while the deletion stays effective for future uses. The second-read
-   * validation point plus pinned READ COMMITTED plus barrier proof arrive in a later package.
+   * <p>This is the phase-one authorization. {@link #attempt} re-reads the authoritative source and
+   * beneficiary inside {@code writeTx} and re-evaluates both decisions before any leg runs; the
+   * second read after the account locks validates the beneficiary data again.
    */
   private TransferResult transferViaBeneficiary(
       TransferCommand command, String idempotencyKey, AuthenticatedActor actor) {
     String hash = requestHash(command);
     Optional<String> sourceHolder = lookup.findHolderCustomerId(command.sourceAccountId());
     if (sourceHolder.isEmpty()) {
-      return rejectOrRecover(command, idempotencyKey, hash, actor, "unknown account");
+      throw sourceForbidden();
     }
     var transferDecision = authorization.decideTransfer(actor, sourceHolder.get());
     if (!transferDecision.allowed()) {
-      throw forbidden(transferDecision.reason());
+      throw sourceForbidden();
     }
     Optional<TransferOperationIdempotency> existing = idempotency.findById(idempotencyKey);
     if (existing.isPresent()) {
@@ -214,17 +205,14 @@ public class TransferService {
     Optional<BeneficiaryResolution> resolved =
         beneficiaries.resolveForOwner(command.beneficiaryId(), actorSubject(actor));
     if (resolved.isEmpty()) {
-      return rejectOrRecover(command, idempotencyKey, hash, actor, "invalid beneficiary");
+      // Do not persist a rejection from phase one. Phase two re-authorizes the source and
+      // re-resolves the beneficiary inside writeTx before any evidence is written.
+      return submit(command, idempotencyKey, hash, actor, null);
     }
     var manageDecision =
         authorization.decideManageBeneficiary(actor, resolved.get().ownerCustomerId());
     if (!manageDecision.allowed()) {
       throw forbidden(manageDecision.reason());
-    }
-    if (command.sourceAccountId() != null
-        && command.sourceAccountId().equals(resolved.get().destinationAccountId())) {
-      return rejectOrRecover(
-          command, idempotencyKey, hash, actor, "source and destination must differ");
     }
     TransferCommand effective =
         new TransferCommand(
@@ -234,28 +222,6 @@ public class TransferService {
             command.amountMinorUnits(),
             command.currency());
     return submit(effective, idempotencyKey, hash, actor, resolved.get());
-  }
-
-  /**
-   * Collision-aware deterministic rejection. The insert may lose a concurrent race for the same
-   * key; the losing write transaction rolls back completely, then the committed winner is loaded in
-   * a fresh read transaction and resolved through the normal authorization/intent checks. Without a
-   * winner the collision is not a determinable idempotency outcome and propagates.
-   */
-  private TransferResult rejectOrRecover(
-      TransferCommand command,
-      String idempotencyKey,
-      String hash,
-      AuthenticatedActor actor,
-      String reason) {
-    try {
-      return writeTx
-          .execute(status -> reject(command, idempotencyKey, hash, actor, reason))
-          .resultOrThrow();
-    } catch (DataIntegrityViolationException | EntityExistsException collision) {
-      return recoverWinnerInFreshReadTx(
-          idempotencyKey, command, hash, idempotencyKey, actor, collision);
-    }
   }
 
   /**
@@ -402,6 +368,49 @@ public class TransferService {
       String hash,
       AuthenticatedActor actor,
       BeneficiaryResolution beneficiary) {
+    // H-03: phase two starts inside writeTx. Re-read authoritative state and re-evaluate both
+    // decisions before any financial leg, lock, idempotency or audit write. A denial here throws
+    // out of the transaction with nothing persisted; the caller never receives a fabricated
+    // rejection evidence row for an unauthorized origin.
+    Optional<String> sourceHolder = lookup.findHolderCustomerId(command.sourceAccountId());
+    if (sourceHolder.isEmpty()) {
+      throw sourceForbidden();
+    }
+    var transferDecision = authorization.decideTransfer(actor, sourceHolder.get());
+    if (!transferDecision.allowed()) {
+      throw sourceForbidden();
+    }
+    Optional<BeneficiaryResolution> currentBeneficiary = Optional.empty();
+    if (command.beneficiaryId() != null) {
+      currentBeneficiary =
+          beneficiaries.resolveForOwner(command.beneficiaryId(), actorSubject(actor));
+      if (currentBeneficiary.isEmpty()) {
+        // The source is authorized, so this is the ordinary auditable business rejection for an
+        // unknown/removed/foreign-owned beneficiary; it must not become a source 403.
+        return reject(command, idempotencyKey, hash, actor, "invalid beneficiary");
+      }
+      var manageDecision =
+          authorization.decideManageBeneficiary(actor, currentBeneficiary.get().ownerCustomerId());
+      if (!manageDecision.allowed()) {
+        throw forbidden(manageDecision.reason());
+      }
+      command =
+          new TransferCommand(
+              command.sourceAccountId(),
+              currentBeneficiary.get().destinationAccountId(),
+              command.beneficiaryId(),
+              command.amountMinorUnits(),
+              command.currency());
+      beneficiary = currentBeneficiary.get();
+    }
+    // Effective destination and existence checks run only after both phase-two decisions allow.
+    if (command.sourceAccountId() != null
+        && command.sourceAccountId().equals(command.destinationAccountId())) {
+      return reject(command, idempotencyKey, hash, actor, "source and destination must differ");
+    }
+    if (lookup.findHolderCustomerId(command.destinationAccountId()).isEmpty()) {
+      return reject(command, idempotencyKey, hash, actor, "unknown account");
+    }
     boolean sourceFirst =
         command.sourceAccountId() == null
             || command.destinationAccountId() == null
@@ -486,6 +495,7 @@ public class TransferService {
             TransferOperationOutcome.CONFIRMED,
             command.sourceAccountId(),
             command.beneficiaryId(),
+            command.beneficiaryId() != null ? null : command.destinationAccountId(),
             command.beneficiaryId() != null ? "beneficiary-transfer" : "direct",
             command.amountMinorUnits(),
             command.currency()));
@@ -554,6 +564,7 @@ public class TransferService {
             TransferOperationOutcome.REJECTED,
             command.sourceAccountId(),
             command.beneficiaryId(),
+            command.beneficiaryId() != null ? null : command.destinationAccountId(),
             command.beneficiaryId() != null ? "beneficiary-transfer" : "direct",
             command.amountMinorUnits(),
             command.currency()));
@@ -643,11 +654,11 @@ public class TransferService {
     Optional<String> holder =
         source == null ? Optional.empty() : lookup.findHolderCustomerId(source);
     if (holder.isEmpty()) {
-      throw forbidden("transfer source unavailable");
+      throw sourceForbidden();
     }
     var transferDecision = authorization.decideTransfer(actor, holder.get());
     if (!transferDecision.allowed()) {
-      throw forbidden(transferDecision.reason());
+      throw sourceForbidden();
     }
     if ("beneficiary-transfer".equals(stored.getPath())) {
       Optional<TransferBeneficiaryUsage> use =
@@ -718,6 +729,13 @@ public class TransferService {
     return actor == null ? null : actor.subject();
   }
 
+  private TransferOperationException sourceForbidden() {
+    // Uniform for a missing source and a source owned by another actor. The body deliberately
+    // carries no account id, holder, existence hint, or decision-specific reason.
+    return new TransferOperationException(
+        TransferOperationException.Kind.FORBIDDEN, "transfer not authorized");
+  }
+
   private TransferOperationException forbidden(String reason) {
     if (reason != null && reason.contains("unauthenticated")) {
       return new TransferOperationException(
@@ -770,9 +788,10 @@ public class TransferService {
   /**
    * Intent comparison for an existing idempotency key (ADR-21:117, scope B). The stored hash must
    * match and every persisted identity field must agree with the incoming command: source, path
-   * discriminator, beneficiary id on the beneficiary path, amount, and canonically compared
-   * currency. Historical rows (null path, pre-V11) keep hash-only legacy semantics. The direct
-   * destination has no persisted column, so it stays covered by the hash (documented limitation).
+   * discriminator, beneficiary id on the beneficiary path, direct destination when the row carries
+   * one, amount, and canonically compared currency. Historical rows (null path, pre-V11) and
+   * pre-V13 direct rows without a persisted destination keep hash-only legacy semantics; the direct
+   * hash still includes the destination, so a different destination cannot replay.
    */
   static boolean matchesIntent(
       TransferOperationIdempotency stored, TransferCommand command, String hash) {
@@ -798,7 +817,10 @@ public class TransferService {
     if ("beneficiary-transfer".equals(path)) {
       return Objects.equals(stored.getBeneficiaryId(), command.beneficiaryId());
     }
-    return true;
+    // Legacy pre-V13 direct rows have no persisted destination; preserve the approved hash-only
+    // policy rather than reconstructing or inventing it. New direct rows always persist it.
+    return stored.getDestinationAccountId() == null
+        || Objects.equals(stored.getDestinationAccountId(), command.destinationAccountId());
   }
 
   /**
@@ -848,7 +870,8 @@ public class TransferService {
         beneficiaries.resolveForOwner(command.beneficiaryId(), beneficiary.ownerCustomerId());
     if (current.isEmpty()
         || !current.get().ownerCustomerId().equals(beneficiary.ownerCustomerId())
-        || !current.get().destinationAccountId().equals(command.destinationAccountId())) {
+        || !current.get().destinationAccountId().equals(command.destinationAccountId())
+        || !current.get().destinationCurrency().equals(beneficiary.destinationCurrency())) {
       throw secondLegRefusal(idempotencyKey, "invalid beneficiary");
     }
   }

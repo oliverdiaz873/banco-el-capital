@@ -6,7 +6,6 @@ import java.util.UUID;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import com.bancoelcapital.accounts.internal.Account;
 import com.bancoelcapital.accounts.internal.AccountRepository;
 
 /**
@@ -28,6 +27,6 @@ public class AccountLookupService {
     if (accountId == null) {
       return Optional.empty();
     }
-    return accounts.findById(accountId).map(Account::getHolderCustomerId);
+    return accounts.findHolderCustomerIdById(accountId);
   }
 }

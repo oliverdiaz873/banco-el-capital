@@ -108,7 +108,7 @@ class TransferBeneficiaryBarrierTest {
     AtomicInteger calls = new AtomicInteger();
     doAnswer(
             invocation -> {
-              if (calls.incrementAndGet() == 2) {
+              if (calls.incrementAndGet() == 3) {
                 entered.countDown();
                 if (!gate.await(30, TimeUnit.SECONDS)) {
                   throw new IllegalStateException("barrier gate timeout");
@@ -164,7 +164,7 @@ class TransferBeneficiaryBarrierTest {
     AtomicInteger calls = new AtomicInteger();
     doAnswer(
             invocation -> {
-              if (calls.incrementAndGet() == 2) {
+              if (calls.incrementAndGet() == 3) {
                 Object result = invocation.callRealMethod();
                 entered.countDown();
                 if (!gate.await(30, TimeUnit.SECONDS)) {
@@ -196,6 +196,75 @@ class TransferBeneficiaryBarrierTest {
     assertThat(balanceOf(sourceId)).isEqualTo(60_00L);
     assertThat(balanceOf(destinationId)).isEqualTo(40_00L);
     assertThat(beneficiaries.findForOwner(beneficiaryId, sourceActor)).isEmpty();
+  }
+
+  @Test
+  void destinationChangeBeforePostLockReadRollsBackAndRejects() throws Exception {
+    UUID beneficiaryId = saveBeneficiary("tbb-dest-change");
+    UUID alternateDestinationId =
+        accounts
+            .create(
+                new AccountCreationCommand(sourceActor.subject(), "DOP", "BASIC"),
+                "alt-tbb-" + tag,
+                sourceActor)
+            .accountId();
+    TransferCommand command = new TransferCommand(sourceId, null, beneficiaryId, 40_00L, "DOP");
+    String key = "tbb-dest-change-use-" + tag;
+    CountDownLatch entered = new CountDownLatch(1);
+    CountDownLatch gate = new CountDownLatch(1);
+    AtomicInteger calls = new AtomicInteger();
+    doAnswer(
+            invocation -> {
+              if (calls.incrementAndGet() == 3) {
+                entered.countDown();
+                if (!gate.await(30, TimeUnit.SECONDS)) {
+                  throw new IllegalStateException("barrier gate timeout");
+                }
+              }
+              return invocation.callRealMethod();
+            })
+        .when(resolver)
+        .resolveForOwner(any(), any());
+
+    ExecutorService pool = Executors.newFixedThreadPool(1);
+    try {
+      Future<TransferResult> future =
+          pool.submit(() -> transfers.transfer(command, key, sourceActor));
+      assertThat(entered.await(30, TimeUnit.SECONDS)).isTrue();
+      assertThat(
+              jdbc.update(
+                  "update beneficiaries set destination_account_id = ? where id = ?",
+                  alternateDestinationId,
+                  beneficiaryId))
+          .isEqualTo(1);
+      gate.countDown();
+
+      try {
+        future.get(60, TimeUnit.SECONDS);
+        assertThat(false).as("expected deterministic rejection").isTrue();
+      } catch (ExecutionException e) {
+        assertThat(e.getCause()).isInstanceOf(TransferOperationException.class);
+        assertThat(((TransferOperationException) e.getCause()).getKind())
+            .isEqualTo(TransferOperationException.Kind.REJECTED);
+      }
+    } finally {
+      pool.shutdownNow();
+    }
+
+    Map<String, Object> row = intentRow(key);
+    assertThat(row.get("outcome")).isEqualTo("REJECTED");
+    assertThat(row.get("beneficiary_id")).isEqualTo(beneficiaryId);
+    assertThat(operationMovements(row.get("operation_id"))).isZero();
+    assertThat(usageCount(row.get("operation_id"))).isZero();
+    assertThat(balanceOf(sourceId)).isEqualTo(100_00L);
+    assertThat(balanceOf(destinationId)).isZero();
+    assertThat(balanceOf(alternateDestinationId)).isZero();
+    assertThat(
+            count(
+                "select count(*) from audit_events where action = 'TRANSFER_REJECTED'"
+                    + " and resource_id = ?",
+                key))
+        .isEqualTo(1);
   }
 
   @Test

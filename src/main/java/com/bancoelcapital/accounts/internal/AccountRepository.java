@@ -12,6 +12,15 @@ import jakarta.persistence.LockModeType;
 public interface AccountRepository extends JpaRepository<Account, UUID> {
 
   /**
+   * Projection-only holder lookup used by the Accounts read contract. It deliberately does not load
+   * the Account entity: a transfer re-reads the source inside its write transaction before taking
+   * the account row locks, and a managed stale Account instance would let the later locked balance
+   * update overwrite a concurrent committed change (lost update).
+   */
+  @Query("select a.holderCustomerId from Account a where a.id = :id")
+  Optional<String> findHolderCustomerIdById(UUID id);
+
+  /**
    * Loads the account row with a write lock (SELECT ... FOR UPDATE). Serializes concurrent balance
    * mutations so parallel credits never lose updates, on H2 and PostgreSQL alike. Used only by the
    * Accounts-owned balance application contract.

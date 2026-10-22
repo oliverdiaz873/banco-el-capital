@@ -139,11 +139,12 @@ ArchUnit rules remain green and unchanged.
 This record registers what was implemented and verified, and nothing more. It does not widen the
 binding scope above, and it keeps three different states apart: architectural acceptance (this ADR),
 verified implementation (below, according to the cited evidence), and integration into the main
-branch, which has NOT happened: the work is committed on `docs/account-movement-history-closure`
-(`eb22acc`, `53988ec`, `9bbc7bb`), published in PR #14, and is not part of `main`. It also
-clarifies, without rewriting it, that the "Acceptance record" statement above
-("it is not evidence that any observability component exists") describes the acceptance date:
-implementation was authorized afterwards, phase by phase, and is reported here.
+branch. The integration footnote in the original record was accurate on 2026-10-18 but is historical:
+the observability code is present in the current repository; this ADR does not assert a later PR
+identifier, merge state or CI run that it cannot cite. It also clarifies,
+without rewriting it, that the "Acceptance record" statement above ("it is not evidence that any
+observability component exists") describes the acceptance date: implementation was authorized
+afterwards, phase by phase, and is reported here.
 
 Implemented in the application wiring package (`com.bancoelcapital.app`), as the only production
 change of this increment:

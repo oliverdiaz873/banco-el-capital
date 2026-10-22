@@ -159,6 +159,7 @@ class TransferServiceTest {
     assertThat(stored.getValue().getOutcome()).isEqualTo(TransferOperationOutcome.CONFIRMED);
     assertThat(stored.getValue().getSourceAccountId()).isEqualTo(sourceId);
     assertThat(stored.getValue().getBeneficiaryId()).isNull();
+    assertThat(stored.getValue().getDestinationAccountId()).isEqualTo(destinationId);
     assertThat(stored.getValue().getPath()).isEqualTo("direct");
     assertThat(stored.getValue().getAmountMinorUnits()).isEqualTo(10_00L);
     assertThat(stored.getValue().getCurrency()).isEqualTo("DOP");
@@ -168,6 +169,8 @@ class TransferServiceTest {
   void rejectsUnknownDestinationWithDirectIntent() {
     when(lookup.findHolderCustomerId(sourceId)).thenReturn(Optional.of("holder-source"));
     when(lookup.findHolderCustomerId(destinationId)).thenReturn(Optional.empty());
+    when(authorization.decideTransfer(actor, "holder-source"))
+        .thenReturn(AuthorizationDecision.allow());
 
     assertThatThrownBy(() -> service.transfer(command, "k1", actor))
         .isInstanceOf(TransferOperationException.class)
@@ -181,6 +184,7 @@ class TransferServiceTest {
     assertThat(stored.getValue().getOutcome()).isEqualTo(TransferOperationOutcome.REJECTED);
     assertThat(stored.getValue().getSourceAccountId()).isEqualTo(sourceId);
     assertThat(stored.getValue().getBeneficiaryId()).isNull();
+    assertThat(stored.getValue().getDestinationAccountId()).isEqualTo(destinationId);
     assertThat(stored.getValue().getPath()).isEqualTo("direct");
     assertThat(stored.getValue().getAmountMinorUnits()).isEqualTo(10_00L);
     assertThat(stored.getValue().getCurrency()).isEqualTo("DOP");
@@ -221,6 +225,9 @@ class TransferServiceTest {
   @Test
   void rejectsSameAccountWithoutFinancialEffect() {
     TransferCommand same = new TransferCommand(sourceId, sourceId, 10_00L, "DOP");
+    when(lookup.findHolderCustomerId(sourceId)).thenReturn(Optional.of("holder-source"));
+    when(authorization.decideTransfer(actor, "holder-source"))
+        .thenReturn(AuthorizationDecision.allow());
 
     assertThatThrownBy(() -> service.transfer(same, "k1", actor))
         .isInstanceOf(TransferOperationException.class)
@@ -237,7 +244,7 @@ class TransferServiceTest {
   }
 
   @Test
-  void rejectsUnknownAccountsWithoutFinancialEffect() {
+  void unknownSourceIsForbiddenWithoutAnyWriteOrDisclosure() {
     when(lookup.findHolderCustomerId(sourceId)).thenReturn(Optional.empty());
 
     assertThatThrownBy(() -> service.transfer(command, "k1", actor))
@@ -245,8 +252,12 @@ class TransferServiceTest {
         .matches(
             e ->
                 ((TransferOperationException) e).getKind()
-                    == TransferOperationException.Kind.REJECTED);
+                    == TransferOperationException.Kind.FORBIDDEN);
+
+    verify(idempotency, never()).save(any());
+    verify(operations, never()).save(any());
     verify(movements, never()).save(any());
+    verify(audit, never()).record(any());
     verify(debits, never()).applyDebit(any());
     verify(credits, never()).applyCredit(any());
   }
@@ -317,6 +328,7 @@ class TransferServiceTest {
             TransferOperationOutcome.CONFIRMED,
             sourceId,
             null,
+            destinationId,
             "direct",
             10_00L,
             "DOP");
@@ -352,6 +364,7 @@ class TransferServiceTest {
             TransferOperationOutcome.CONFIRMED,
             sourceId,
             null,
+            destinationId,
             "direct",
             10_00L,
             "DOP");
@@ -394,6 +407,7 @@ class TransferServiceTest {
             TransferOperationOutcome.CONFIRMED,
             sourceId,
             null,
+            destinationId,
             "direct",
             10_00L,
             "DOP");
@@ -432,6 +446,7 @@ class TransferServiceTest {
             TransferOperationOutcome.CONFIRMED,
             sourceId,
             null,
+            destinationId,
             "direct",
             10_00L,
             "DOP");
@@ -461,7 +476,6 @@ class TransferServiceTest {
   @Test
   void deniesUnauthorizedAndUnauthenticatedActors() {
     when(lookup.findHolderCustomerId(sourceId)).thenReturn(Optional.of("holder-source"));
-    when(lookup.findHolderCustomerId(destinationId)).thenReturn(Optional.of("holder-dest"));
     when(authorization.decideTransfer(actor, "holder-source"))
         .thenReturn(AuthorizationDecision.deny("actor not authorized for holder"));
 
@@ -584,6 +598,7 @@ class TransferServiceTest {
                     TransferOperationOutcome.CONFIRMED,
                     sourceId,
                     null,
+                    destinationId,
                     "direct",
                     10_00L,
                     "DOP")));
@@ -616,6 +631,7 @@ class TransferServiceTest {
                     TransferOperationOutcome.CONFIRMED,
                     sourceId,
                     null,
+                    destinationId,
                     "direct",
                     10_00L,
                     "DOP")));
@@ -667,6 +683,7 @@ class TransferServiceTest {
                     TransferOperationOutcome.CONFIRMED,
                     sourceId,
                     null,
+                    destinationId,
                     "direct",
                     10_00L,
                     "DOP")));
@@ -735,6 +752,7 @@ class TransferServiceTest {
                     TransferOperationOutcome.CONFIRMED,
                     sourceId,
                     null,
+                    destinationId,
                     "direct",
                     10_00L,
                     "DOP")));
@@ -771,6 +789,7 @@ class TransferServiceTest {
                     TransferOperationOutcome.CONFIRMED,
                     sourceId,
                     null,
+                    destinationId,
                     "direct",
                     10_00L,
                     "DOP")));
@@ -802,6 +821,7 @@ class TransferServiceTest {
                     TransferOperationOutcome.CONFIRMED,
                     sourceId,
                     null,
+                    destinationId,
                     "direct",
                     10_00L,
                     "DOP")));
@@ -819,6 +839,33 @@ class TransferServiceTest {
   }
 
   @Test
+  void confirmedReplayWithoutOperationReferenceFailsClosed() {
+    String hash = TransferService.requestHash(command);
+    TransferOperationIdempotency corrupt = mock(TransferOperationIdempotency.class);
+    when(corrupt.getOperationId()).thenReturn(null);
+    when(corrupt.getRequestHash()).thenReturn(hash);
+    when(corrupt.getPath()).thenReturn(null);
+    when(corrupt.getOutcome()).thenReturn(TransferOperationOutcome.CONFIRMED);
+    when(corrupt.getSourceAccountId()).thenReturn(sourceId);
+    when(idempotency.findById("k1")).thenReturn(Optional.of(corrupt));
+    when(lookup.findHolderCustomerId(sourceId)).thenReturn(Optional.of("holder-source"));
+    when(authorization.decideTransfer(actor, "holder-source"))
+        .thenReturn(AuthorizationDecision.allow());
+
+    assertThatThrownBy(() -> service.transfer(command, "k1", actor))
+        .isInstanceOf(TransferOperationException.class)
+        .matches(
+            e ->
+                ((TransferOperationException) e).getKind()
+                    == TransferOperationException.Kind.FAILED);
+
+    verify(operations, never()).save(any());
+    verify(movements, never()).save(any());
+    verify(idempotency, never()).save(any());
+    verify(audit, never()).record(any());
+  }
+
+  @Test
   void queryWithMissingOperationReferenceStaysEmptyWithoutRepositoryLookup() {
     String hash = TransferService.requestHash(command);
     when(idempotency.findById("k1"))
@@ -828,9 +875,10 @@ class TransferServiceTest {
                     "k1",
                     null,
                     hash,
-                    TransferOperationOutcome.CONFIRMED,
+                    TransferOperationOutcome.REJECTED,
                     sourceId,
                     null,
+                    destinationId,
                     "direct",
                     10_00L,
                     "DOP")));

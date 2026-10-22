@@ -72,6 +72,7 @@ class TransferFoundationPersistenceTest {
             TransferOperationOutcome.CONFIRMED,
             sourceId,
             null,
+            destinationId,
             "direct",
             25_00L,
             "DOP"));
@@ -132,6 +133,7 @@ class TransferFoundationPersistenceTest {
             TransferOperationOutcome.CONFIRMED,
             sourceId,
             null,
+            UUID.randomUUID(),
             "direct",
             4_00L,
             "DOP"));
@@ -152,6 +154,7 @@ class TransferFoundationPersistenceTest {
             TransferOperationOutcome.CONFIRMED,
             UUID.randomUUID(),
             null,
+            UUID.randomUUID(),
             "direct",
             1L,
             "DOP"));
@@ -166,6 +169,7 @@ class TransferFoundationPersistenceTest {
             TransferOperationOutcome.CONFIRMED,
             UUID.randomUUID(),
             null,
+            UUID.randomUUID(),
             "direct",
             1L,
             "DOP"));

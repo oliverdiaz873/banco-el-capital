@@ -76,6 +76,9 @@ class TransferBeneficiaryServiceTest {
     lenient()
         .when(transactionManager.getTransaction(any()))
         .thenReturn(mock(TransactionStatus.class));
+    lenient()
+        .when(lookup.findHolderCustomerId(any(UUID.class)))
+        .thenReturn(Optional.of("holder-destination"));
     service =
         new TransferService(
             operations,
@@ -146,6 +149,48 @@ class TransferBeneficiaryServiceTest {
     assertThat(confirmed.getValue().details()).contains(beneficiaryId.toString());
     assertThat(confirmed.getValue().details()).contains("holder-source");
     assertThat(confirmed.getValue().details()).contains("Ahorros");
+  }
+
+  @Test
+  void unknownBeneficiarySourceIsForbiddenBeforeAnyBeneficiaryOrPersistenceWork() {
+    when(lookup.findHolderCustomerId(sourceId)).thenReturn(Optional.empty());
+
+    assertThatThrownBy(() -> service.transfer(command(), "k1", actor))
+        .isInstanceOf(TransferOperationException.class)
+        .matches(
+            e ->
+                ((TransferOperationException) e).getKind()
+                        == TransferOperationException.Kind.FORBIDDEN
+                    && e.getMessage().equals("transfer not authorized"));
+
+    verify(beneficiaries, never()).resolveForOwner(any(), any());
+    verify(operations, never()).save(any());
+    verify(movements, never()).save(any());
+    verify(idempotency, never()).save(any());
+    verify(usage, never()).save(any());
+    verify(audit, never()).record(any());
+    verify(debits, never()).applyDebit(any(AccountDebitCommand.class));
+    verify(credits, never()).applyCredit(any(AccountCreditCommand.class));
+  }
+
+  @Test
+  void foreignBeneficiarySourceIsTheSameForbiddenOutcomeBeforeBeneficiaryWork() {
+    when(lookup.findHolderCustomerId(sourceId)).thenReturn(Optional.of("holder-other"));
+    when(authorization.decideTransfer(actor, "holder-other"))
+        .thenReturn(AuthorizationDecision.deny("actor not authorized for holder"));
+
+    assertThatThrownBy(() -> service.transfer(command(), "k1", actor))
+        .isInstanceOf(TransferOperationException.class)
+        .matches(
+            e ->
+                ((TransferOperationException) e).getKind()
+                        == TransferOperationException.Kind.FORBIDDEN
+                    && e.getMessage().equals("transfer not authorized"));
+
+    verify(beneficiaries, never()).resolveForOwner(any(), any());
+    verify(operations, never()).save(any());
+    verify(idempotency, never()).save(any());
+    verify(audit, never()).record(any());
   }
 
   @Test

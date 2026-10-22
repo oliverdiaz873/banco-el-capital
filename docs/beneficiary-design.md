@@ -7,16 +7,36 @@ lists, inspects, and removes references to internal bank accounts owned by any
 customer, for later use as transfer destinations. Saving a beneficiary moves no
 money; removing one deletes no account and reverses no transfer.
 
-This design implements Alternative A from the Architecture Discovery: Beneficiaries
-manages saved destination references; Transfer keeps receiving account UUIDs
-directly with no execution change. The explicit resolution contract of
-Alternative B is documented as a future evolution only and is NOT built here.
+The original v1 design implemented Alternative A from the Architecture Discovery:
+Beneficiaries manages saved destination references and Transfer initially kept
+receiving account UUIDs directly. ADR-21 subsequently approved the explicit
+beneficiary-resolution contract (the discovery's "Alternative B"), and Phases
+4.1-4.3 implemented it. Transfer now accepts either a direct destination UUID or
+a saved `beneficiaryId`, never both, and resolves the destination server-side
+through `beneficiaries.api.BeneficiaryResolver.resolveForOwner`.
 
-Baseline: `main` at `9a569a6` (PR #6 account-lifecycle). There is no
-`com.bancoelcapital.beneficiaries` production code today; ADR-17 lists
-`beneficiaries/` as an empty placeholder and ADR-01 assigns it ownership of the
-Customer relationship, authorized destination references, and Account resolution
-when needed (it does NOT own Accounts).
+Baseline note: the statement below about `main` at `9a569a6` and an empty
+`beneficiaries/` placeholder is historical. The module, `api/`, `internal/`,
+`web/`, V10 and the ADR-21 consumer now exist.
+
+## Implementation Status (Phases 3-4.3)
+
+- V10 creates `beneficiaries` and `beneficiary_creation_idempotency`. V11 adds
+  transfer-beneficiary intent evidence and `transfer_beneficiary_usage`.
+- CRUD is implemented at the documented endpoints, owner-scoped under the stub.
+- `beneficiaries.api.BeneficiaryResolver` is a read-only, owner-scoped contract
+  used by `financialops.transfer`. It takes no row lock and exposes only a
+  `BeneficiaryResolution` (id, alias, destination account, destination currency,
+  owner customer id).
+- `financialops.transfer -> beneficiaries.api` is the only allowed cross-module
+  edge. `financialops -> beneficiaries.internal|web` remains prohibited.
+- A transfer resolves the beneficiary in phase 1 for a fast denial and again in
+  phase 2 inside `writeTx` before any financial effect. After both account locks
+  are held it re-reads owner, destination and destination currency and rejects on
+  a mismatch. Authoritative reads use projections, never managed entities, so a
+  post-lock query cannot return stale first-level-cache state.
+- Deleting a beneficiary does not delete or rewrite `transfer_beneficiary_usage`;
+  the usage evidence is preserved without a physical FK.
 
 ## Scope
 
@@ -24,17 +44,18 @@ In scope: internal-account beneficiaries with create / list / get / delete,
 owner-scoped authorization under the current stub, destination validation via
 Accounts-owned contracts (existence + currency, no operability gate at save
 time), safe errors without cross-customer disclosure, transverse audit evidence,
-creation idempotency in a dedicated namespace, conceptual V10 shape, and the
+creation idempotency in a dedicated namespace, the V10 schema plus V11 transfer
+usage evidence, the ADR-21 read-only resolver consumed by Transfer, and the
 H2 + PostgreSQL + ArchUnit validation plan.
 
 Out of scope: external bank destinations (ACH, cards, rails), FX, fees, limits,
 overdraft, alias editing (alias immutable in v1), beneficiary lifecycle states
 beyond existence/removal, logical deletion with states, pagination, `BANK_EMPLOYEE`
-management flows, any `TransferCommand` / `TransferService` change, any
-`beneficiaryId` accepted by `POST /api/v1/transfers`, formal ledger /
-double-entry, event sourcing, sagas, Kafka/Redis/microservices/distributed
-transactions, real authentication (JWT/OAuth/Spring Security), retention/cleanup
-policy beyond the conceptual shape.
+management flows, formal ledger / double-entry, event sourcing, sagas,
+Kafka/Redis/microservices/distributed transactions, real authentication
+(JWT/OAuth/Spring Security), retention/cleanup policy beyond the documented
+OPEN status. Transfer's beneficiary execution is no longer out of scope: it is
+implemented under ADR-21 and documented in `transfer-design.md`.
 
 ## Actors and Ownership
 
@@ -119,16 +140,18 @@ Delete rules:
 
 ## Design
 
-- Solution approach: new `beneficiaries` feature with `internal/` (entity,
-  repositories, service, idempotency record) plus `web/` (controllers, DTOs,
-  exception handler) and deliberately NO `beneficiaries.api/` in v1 (per ADR-17:
-  `api/` exists only when a real inter-module consumer exists; Transfer does
-  not consume Beneficiaries in v1). Allowed dependencies:
+- Solution approach: `beneficiaries` feature with `internal/` (entity,
+  repositories, service, idempotency record), `web/` (controllers, DTOs,
+  exception handler) and `api/` (read-only resolver contract). The original v1
+  deliberately omitted `api/` because Transfer did not consume Beneficiaries;
+  ADR-21 created that consumer and Phase 4 added `api/`. Allowed dependencies:
   `beneficiaries -> accounts.api`, `beneficiaries -> identity`,
-  `beneficiaries -> audit.api`. Prohibited:
+  `beneficiaries -> audit.api`, plus the separately approved
+  `financialops.transfer -> beneficiaries.api` edge. Prohibited:
   `beneficiaries -> accounts.internal|web`, `-> customers.*`,
-  `-> financialops.*`, `-> audit.internal`, and any `web -> Repository` or
-  `web -> Entity` (same Rules A-E as ADR-17; new ArchUnit rules required).
+  `-> financialops.*`, `-> audit.internal`, `financialops -> beneficiaries.internal|web`,
+  and any `web -> Repository` or `web -> Entity` (same Rules A-E as ADR-17;
+  ArchUnit rules updated, not weakened).
 - Transactional strategy (PostgreSQL-safe, verified pattern): the create
   attempt runs in exactly one outer local write transaction (`writeTx` via
   `TransactionTemplate`), and the winner reload after a
@@ -181,16 +204,18 @@ Delete rules:
 - Read paths are owner-scoped: list returns only rows where
   `owner_customer_id == actor.subject()`, ordered by `created_at`; get by id
   returns the row only if owned.
-- Affected components: `beneficiaries` (new), `accounts.api` (one additive
-  read contract), `identity` (one additive `decideManageBeneficiary` method +
-  stub), `audit` (new `BENEFICIARY_*` actions via existing `audit.api`).
-  No changes to `financialops`, `customers`, existing migrations V1-V9, or
-  existing API paths.
-- Data changes: conceptual V10 only (see below); no changes to existing
-  tables. Cross-module references stay logical (no FK to accounts/customers),
+- Affected components: `beneficiaries` (new), `accounts.api` (additive read
+  contracts for destination currency), `identity` (additive
+  `decideManageBeneficiary` method + stub), `audit` (new `BENEFICIARY_*`
+  actions via existing `audit.api`), and the ADR-21 `financialops.transfer`
+  consumer through `beneficiaries.api` only.
+- Data changes: V10 `beneficiaries` + `beneficiary_creation_idempotency`; V11
+  adds transfer-beneficiary intent columns and `transfer_beneficiary_usage`.
+  Cross-module references stay logical (no physical FK to accounts/customers),
   consistent with V2/V4/V5/V8/V9.
-- Backward compatibility: purely additive (new tables, new endpoints); no
-  existing API or table change.
+- Backward compatibility: additive tables/endpoints. Existing direct transfers
+  keep their request shape and hash identity; the beneficiary path is an
+  explicit XOR alternative.
 
 ## Outcome Semantics
 
@@ -261,10 +286,13 @@ DTO shapes mirror existing records (`TransferResponse(operationId, created)`,
   (`beneficiaryId null` when the stored outcome is `REJECTED`); authorized by
   owner; hash mismatch and absence both resolve to `404` without
   distinguishing.
-- Future Alternative B (NOT in v1): `POST /api/v1/transfers` MAY accept
-  `beneficiaryId` xor `destinationAccountId`, resolved server-side; the
-  operation MUST persist enough `beneficiary_ref` to reconstruct which
-  beneficiary was used (ADR-05 traceability). Documented only.
+- Implemented Alternative B (ADR-21): `POST /api/v1/transfers` accepts exactly
+  one of `beneficiaryId` and `destinationAccountId`, resolved server-side. A
+  transfer by beneficiary persists enough evidence to reconstruct which
+  beneficiary was used: `transfer_operation_idempotency` intent columns for
+  CONFIRMED/REJECTED (including the V13 direct-destination evidence on the
+  direct path) and `transfer_beneficiary_usage` for CONFIRMED usage (no
+  physical FK; evidence survives beneficiary deletion).
 
 ## Safe Errors (no disclosure)
 
@@ -387,10 +415,10 @@ the ADR-20 Atomicity section verbatim in requirements.
   lowercase (64 chars). Same intent + same key MUST NOT create a second row;
   same key + incompatible payload is a conflict.
 
-## Data — Conceptual V10 (hypothesis, no migration written here)
+## Data — V10 implemented (V11 adds transfer evidence)
 
 ```sql
--- V10__beneficiary_foundation.sql (conceptual; exact DDL in implementation)
+-- V10__beneficiary_foundation.sql (implemented; exact production DDL may differ)
 CREATE TABLE beneficiaries (
   id UUID PRIMARY KEY,
   owner_customer_id VARCHAR(64) NOT NULL,
@@ -429,12 +457,15 @@ same rationale as ADR-18/19).
 ArchUnit: new rules `beneficiariesMustNotDependOn{AccountsInternal,
 AccountsWeb, Customers, FinancialOps, AuditInternal}`,
 `beneficiariesWebMustNotDependOnRepositories/Entities`,
-`moduleApisMustNotDependOnWeb` coverage, `moduleSlicesAreFreeOfCycles`.
-`financialops -> beneficiaries` MUST remain absent (asserted negatively).
+`moduleApisMustNotDependOnWeb` coverage, `moduleSlicesAreFreeOfCycles`, and the
+ADR-21 exception allowing only `financialops.transfer -> beneficiaries.api`.
+`financialops -> beneficiaries.internal|web` MUST remain absent (asserted
+negatively).
 
 ## Decisions Recorded (human-approved)
 
-P1 internal-only scope; P2 Transfer intact (Alt A); P3 CRUD
+P1 internal-only scope; P2 original v1 transfer unchanged (superseded by the
+separately accepted ADR-21 for the beneficiary path); P3 CRUD
 create/list/get/delete; P4 alias immutable v1; P5 uniqueness on
 `(owner, destination)` only; P6 self-only authz; P7 minimal disclosure
 (alias + opaque id + currency); P8 logical references without physical FKs;
@@ -443,10 +474,13 @@ no delete idempotency namespace); precision C (alias duplicates allowed).
 
 ## Rejected Alternatives (with reason)
 
-- Beneficiary resolution inside Transfer in v1 -> Rejected: no approved
-  consumer contract; would touch the most sensitive invariant without need.
-- `beneficiaries.api` with resolution service now -> Rejected: speculative
-  abstraction (no consumer); document the evolution instead.
+- Beneficiary resolution inside Transfer in the original v1 -> Rejected then
+  because no approved consumer contract existed. ADR-21 later approved that
+  contract and Phase 4 implemented it; this entry is historical, not a current
+  prohibition.
+- `beneficiaries.api` with resolution service in the original v1 -> Rejected
+  then as speculative because no consumer existed. ADR-21 created the consumer
+  and the contract is now implemented.
 - Operability gate at save -> Rejected as default: stale check cannot replace
   the Transfer-time lock-protected check; only a product rule could justify it.
 - `UNIQUE(owner, alias)` -> Rejected: unconfirmed need; would forbid equal
@@ -468,15 +502,21 @@ no delete idempotency namespace); precision C (alias duplicates allowed).
 - ADR-09: stub authz extended by one method, same self-or-employee shape.
 - ADR-10: versioned REST, queryable results, safe errors preserved.
 - ADR-11: transverse audit with new actions; history/audit/logs separation kept.
-- ADR-17: feature packaging (`internal` + `web`, no ornamental `api/`);
-  ArchUnit extended, not weakened.
-- ADR-18/19: money and lifecycle paths untouched; operability stays observed
-  at operation time.
+- ADR-17: feature packaging (`api` + `internal` + `web`); the `api/` contract
+  now exists for the ADR-21 consumer. ArchUnit extended, not weakened.
+- ADR-18/19: money and lifecycle paths changed only through the separately
+  accepted ADR-21 beneficiary path; operability stays observed at operation
+  time under the account locks.
+- ADR-21: accepted and implemented; see `transfer-design.md` and
+  `ADR-21-transfer-via-saved-beneficiary.md` for the two-phase authorization,
+  source `403` rule, post-lock revalidation and V11/V12 evidence.
 
 ## Status
 
 Accepted design — formally approved by human review with P1-P8 + precisions A-C
 (A: `Optional<DestinationCurrency>` minimal contract; B: `204 No Content` on
 delete; C: physical delete default, retention OPEN per repo inspection).
-Implementation must stay within these bounds; any deviation (especially touching
-Transfer or adding `beneficiaries.api`) requires new explicit approval.
+Implementation of the original v1 stayed within those bounds. The later
+ADR-21 beneficiary-transfer consumer, `beneficiaries.api`, Transfer changes and
+V11 evidence were approved separately and are implemented in Phases 4.1-4.3;
+they are not a silent deviation from the original v1 scope.
