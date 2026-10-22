@@ -42,6 +42,7 @@ import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.PersistenceContext;
+import jakarta.persistence.PersistenceException;
 
 /**
  * Scope A1: POST existing-key authorization against persisted snapshots. Denial is
@@ -81,6 +82,7 @@ class TransferReplayAuthorizationTest {
 
   UUID sourceId;
   UUID destinationId;
+  UUID secondDestinationId;
   AuthenticatedActor sourceActor;
   AuthenticatedActor otherActor;
 
@@ -102,6 +104,13 @@ class TransferReplayAuthorizationTest {
             .create(
                 new AccountCreationCommand("holder-tra-dst", "DOP", "BASIC"),
                 "b-tra",
+                destinationActor)
+            .accountId();
+    secondDestinationId =
+        accounts
+            .create(
+                new AccountCreationCommand("holder-tra-dst", "DOP", "BASIC"),
+                "c-tra-second",
                 destinationActor)
             .accountId();
     deposits.deposit(new DepositCommand(sourceId, 100_00L, "DOP"), "f-tra", sourceActor);
@@ -136,6 +145,30 @@ class TransferReplayAuthorizationTest {
     assertThat(operationMovements(first.operationId())).isEqualTo(2);
     assertThat(balanceOf(sourceId)).isEqualTo(60_00L);
     assertThat(balanceOf(destinationId)).isEqualTo(40_00L);
+  }
+
+  @Test
+  void directReplayWithDifferentDestinationConflicts() {
+    TransferCommand original = new TransferCommand(sourceId, destinationId, 40_00L, "DOP");
+    transfers.transfer(original, "tra-dest-conflict", sourceActor);
+
+    TransferCommand conflicting = new TransferCommand(sourceId, secondDestinationId, 40_00L, "DOP");
+    assertThatThrownBy(() -> transfers.transfer(conflicting, "tra-dest-conflict", sourceActor))
+        .isInstanceOf(TransferOperationException.class)
+        .matches(
+            e ->
+                ((TransferOperationException) e).getKind()
+                    == TransferOperationException.Kind.CONFLICT);
+
+    assertThat(balanceOf(sourceId)).isEqualTo(60_00L);
+    assertThat(balanceOf(destinationId)).isEqualTo(40_00L);
+    assertThat(balanceOf(secondDestinationId)).isZero();
+    assertThat(
+            count(
+                "select count(*) from audit_events where action = 'TRANSFER_CONFLICT'"
+                    + " and resource_id = ?",
+                "tra-dest-conflict"))
+        .isEqualTo(1);
   }
 
   @Test
@@ -235,7 +268,7 @@ class TransferReplayAuthorizationTest {
   }
 
   @Test
-  void unknownSourceRejectionRetryFailsClosedWithoutReplay() {
+  void unknownSourceRetryStaysForbiddenAndCreatesNoReplayableEvidence() {
     UUID unknownSource = UUID.randomUUID();
     String key = "tra-unknown-source";
     TransferCommand command = new TransferCommand(unknownSource, destinationId, 40_00L, "DOP");
@@ -245,9 +278,12 @@ class TransferReplayAuthorizationTest {
         .matches(
             e ->
                 ((TransferOperationException) e).getKind()
-                    == TransferOperationException.Kind.REJECTED);
-    Map<String, Object> before = intentRow(key);
-    assertThat(before.get("outcome")).isEqualTo("REJECTED");
+                    == TransferOperationException.Kind.FORBIDDEN);
+    assertThat(
+            count(
+                "select count(*) from transfer_operation_idempotency where idempotency_key = ?",
+                key))
+        .isZero();
 
     assertThatThrownBy(() -> transfers.transfer(command, key, sourceActor))
         .isInstanceOf(TransferOperationException.class)
@@ -256,24 +292,22 @@ class TransferReplayAuthorizationTest {
                 ((TransferOperationException) e).getKind()
                     == TransferOperationException.Kind.FORBIDDEN);
 
-    assertThat(intentRow(key)).isEqualTo(before);
-    assertThat(count("select count(*) from financial_operations where operation_type = 'TRANSFER'"))
-        .isEqualTo(1);
     assertThat(
             count(
-                "select count(*) from movements where operation_id = ?",
-                before.get("operation_id")))
+                "select count(*) from transfer_operation_idempotency where idempotency_key = ?",
+                key))
+        .isZero();
+    assertThat(count("select count(*) from financial_operations where operation_type = 'TRANSFER'"))
+        .isZero();
+    assertThat(
+            count(
+                "select count(*) from movements m join financial_operations o"
+                    + " on o.id = m.operation_id where o.operation_type = 'TRANSFER'"))
         .isZero();
     assertThat(count("select count(*) from transfer_beneficiary_usage")).isZero();
     assertThat(
             count(
-                "select count(*) from audit_events where action = 'TRANSFER_REJECTED'"
-                    + " and resource_id = ?",
-                key))
-        .isEqualTo(1);
-    assertThat(
-            count(
-                "select count(*) from audit_events where action = 'TRANSFER_CONFLICT'"
+                "select count(*) from audit_events where action like 'TRANSFER_%'"
                     + " and resource_id = ?",
                 key))
         .isZero();
@@ -284,15 +318,26 @@ class TransferReplayAuthorizationTest {
   @Test
   void confirmedWithoutOwnerSnapshotFailsClosed() {
     UUID beneficiaryId = UUID.randomUUID();
+    UUID operationId = UUID.randomUUID();
     TransferCommand command = new TransferCommand(sourceId, null, beneficiaryId, 40_00L, "DOP");
+    entities.persist(
+        new FinancialOperation(
+            operationId,
+            FinancialOperationType.TRANSFER,
+            sourceActor.subject(),
+            sourceId,
+            40_00L,
+            "DOP",
+            FinancialOperationStatus.CONFIRMED));
     entities.persist(
         new TransferOperationIdempotency(
             "tra-fc",
-            null,
+            operationId,
             TransferService.requestHash(command),
             TransferOperationOutcome.CONFIRMED,
             sourceId,
             beneficiaryId,
+            null,
             "beneficiary-transfer",
             40_00L,
             "DOP"));
@@ -306,7 +351,7 @@ class TransferReplayAuthorizationTest {
                     == TransferOperationException.Kind.FORBIDDEN);
 
     assertThat(count("select count(*) from financial_operations where operation_type = 'TRANSFER'"))
-        .isZero();
+        .isEqualTo(1);
     assertThat(count("select count(*) from transfer_beneficiary_usage")).isZero();
     assertThat(count("select count(*) from audit_events where resource_id = ?", "tra-fc")).isZero();
     assertThat(balanceOf(sourceId)).isEqualTo(100_00L);
@@ -314,51 +359,27 @@ class TransferReplayAuthorizationTest {
   }
 
   /**
-   * Contrato de {@code operationId}: una fila CONFIRMED del camino directo sin referencia de
-   * operación atraviesa la autorización real contra la fuente persistida y la comparación real de
-   * intención, pero el replay falla cerrado en lugar de devolver un éxito sin identificador. No se
-   * crea ninguna operación, movimiento ni auditoría nueva.
+   * The pre-V12 inconsistent shape is now rejected by the equivalent H2 CHECK before it can be
+   * persisted. The defensive runtime guard for a loaded/mocked row is covered by the service unit
+   * suite; this test proves the database is the final arbiter.
    */
   @Test
-  void confirmedDirectReplayWithoutOperationIdFailsClosed() {
-    TransferCommand command = new TransferCommand(sourceId, destinationId, 40_00L, "DOP");
-    entities.persist(
-        new TransferOperationIdempotency(
-            "tra-no-op",
-            null,
-            TransferService.requestHash(command),
-            TransferOperationOutcome.CONFIRMED,
-            sourceId,
-            null,
-            "direct",
-            40_00L,
-            "DOP"));
-    entities.flush();
-
-    Map<String, Object> stored = intentRow("tra-no-op");
-    assertThat(stored.get("outcome")).isEqualTo("CONFIRMED");
-    assertThat(stored.get("operation_id")).isNull();
-
-    assertThatThrownBy(() -> transfers.transfer(command, "tra-no-op", sourceActor))
-        .isInstanceOf(TransferOperationException.class)
-        .matches(
-            e ->
-                ((TransferOperationException) e).getKind()
-                    == TransferOperationException.Kind.FAILED);
-
-    entities.flush();
-    assertThat(count("select count(*) from financial_operations where operation_type = 'TRANSFER'"))
-        .isZero();
-    assertThat(
-            count(
-                "select count(*) from movements m join financial_operations o"
-                    + " on o.id = m.operation_id where o.operation_type = 'TRANSFER'"))
-        .isZero();
-    assertThat(count("select count(*) from audit_events where resource_id = ?", "tra-no-op"))
-        .isZero();
-    assertThat(intentRow("tra-no-op")).isEqualTo(stored);
-    assertThat(balanceOf(sourceId)).isEqualTo(100_00L);
-    assertThat(balanceOf(destinationId)).isZero();
+  void confirmedDirectRowWithoutOperationIdIsRejectedByDatabaseConstraint() {
+    assertThatThrownBy(
+            () ->
+                entities
+                    .createNativeQuery(
+                        "insert into transfer_operation_idempotency (idempotency_key, operation_id,"
+                            + " request_hash, outcome, created_at, source_account_id, beneficiary_id,"
+                            + " destination_account_id, path, amount_minor_units, currency)"
+                            + " values ('tra-no-op', NULL, 'h',"
+                            + " 'CONFIRMED', now(), '"
+                            + sourceId
+                            + "', NULL, '"
+                            + destinationId
+                            + "', 'direct', 4000, 'DOP')")
+                    .executeUpdate())
+        .isInstanceOf(PersistenceException.class);
   }
 
   /**
@@ -379,6 +400,7 @@ class TransferReplayAuthorizationTest {
             TransferOperationOutcome.CONFIRMED,
             sourceId,
             null,
+            destinationId,
             "direct",
             40_00L,
             "DOP"));
@@ -438,6 +460,7 @@ class TransferReplayAuthorizationTest {
             TransferOperationOutcome.CONFIRMED,
             sourceId,
             null,
+            destinationId,
             "direct",
             40_00L,
             "DOP"));
@@ -473,6 +496,7 @@ class TransferReplayAuthorizationTest {
             TransferOperationOutcome.CONFIRMED,
             sourceId,
             null,
+            destinationId,
             "direct",
             40_00L,
             "DOP"));
@@ -531,6 +555,7 @@ class TransferReplayAuthorizationTest {
             TransferOperationOutcome.CONFIRMED,
             sourceId,
             beneficiaryId,
+            null,
             "beneficiary-transfer",
             40_00L,
             "DOP"));
@@ -567,9 +592,10 @@ class TransferReplayAuthorizationTest {
             "tra-no-op-query",
             null,
             hash,
-            TransferOperationOutcome.CONFIRMED,
+            TransferOperationOutcome.REJECTED,
             sourceId,
             null,
+            destinationId,
             "direct",
             40_00L,
             "DOP"));
@@ -652,6 +678,7 @@ class TransferReplayAuthorizationTest {
             operationId,
             TransferService.requestHash(command),
             TransferOperationOutcome.CONFIRMED,
+            null,
             null,
             null,
             null,

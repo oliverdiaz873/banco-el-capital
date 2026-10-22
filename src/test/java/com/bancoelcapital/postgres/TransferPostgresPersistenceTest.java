@@ -10,6 +10,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import com.bancoelcapital.accounts.internal.AccountCreationCommand;
 import com.bancoelcapital.accounts.internal.AccountCreationService;
@@ -40,6 +42,8 @@ class TransferPostgresPersistenceTest extends AbstractPostgresTest {
   @Autowired AccountCreationService accounts;
 
   @Autowired JdbcTemplate jdbc;
+
+  @Autowired PlatformTransactionManager transactionManager;
 
   UUID sourceId;
   UUID destinationId;
@@ -193,6 +197,52 @@ class TransferPostgresPersistenceTest extends AbstractPostgresTest {
                 sourceId))
         .isZero();
     assertThat(count("select count(*) from movements where account_id = ?", destinationId))
+        .isZero();
+    assertThat(balanceOf(sourceId)).isEqualTo(100_00L);
+    assertThat(balanceOf(destinationId)).isZero();
+  }
+
+  @Test
+  void callerRollbackAfterSuccessfulTransferLeavesNoTransactionalEffects() {
+    String key = "t-caller-rollback-" + tag;
+    TransactionTemplate outer = new TransactionTemplate(transactionManager);
+    TransferResult result =
+        outer.execute(
+            status -> {
+              TransferResult confirmed =
+                  transfers.transfer(
+                      new TransferCommand(sourceId, destinationId, 40_00L, "DOP"),
+                      key,
+                      sourceActor);
+              status.setRollbackOnly();
+              return confirmed;
+            });
+
+    assertThat(result).isNotNull();
+    assertThat(result.created()).isTrue();
+    assertThat(
+            count(
+                "select count(*) from transfer_operation_idempotency where idempotency_key = ?",
+                key))
+        .isZero();
+    assertThat(
+            count(
+                "select count(*) from financial_operations where operation_type = 'TRANSFER'"
+                    + " and account_id = ?",
+                sourceId))
+        .isZero();
+    assertThat(
+            count(
+                "select count(*) from movements m join financial_operations o"
+                    + " on o.id = m.operation_id where o.operation_type = 'TRANSFER'"
+                    + " and o.account_id = ?",
+                sourceId))
+        .isZero();
+    assertThat(
+            count(
+                "select count(*) from audit_events where action = 'TRANSFER_CONFIRMED'"
+                    + " and resource_id = ?",
+                result.operationId().toString()))
         .isZero();
     assertThat(balanceOf(sourceId)).isEqualTo(100_00L);
     assertThat(balanceOf(destinationId)).isZero();

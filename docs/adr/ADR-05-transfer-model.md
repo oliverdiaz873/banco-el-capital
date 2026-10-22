@@ -1,5 +1,11 @@
 # ADR-05: Transfer Model
 
+> Implementation note (Phase 4.3, H-04): for Transfer, a source that is unknown or not
+> authorized by the actor returns a uniform `403` and persists no operation, idempotency
+> row, rejection audit or movement. The generic REJECTED examples in this Proposed ADR are
+> historical model text; the approved H-04 rule takes precedence for source authorization.
+> Destination/beneficiary business failures after source authorization remain `422`.
+
 ## Context
 ADR-01 assigns financial coordination to Financial Operations within a Modular Monolith. ADR-02 defines Operation as intent plus lifecycle and Movement as confirmed immutable effect. ADR-03 defines Account lifecycle, holders, currency, product, and balance consistency. ADR-04 defines PENDING/CONFIRMED/REJECTED/FAILED with explicit recovery and idempotency. We must define Transfer as a financial use case without separate infrastructure, persistence, API, locking, or distributed decisions.
 

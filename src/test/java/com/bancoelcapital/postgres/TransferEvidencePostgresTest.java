@@ -132,6 +132,7 @@ class TransferEvidencePostgresTest extends AbstractPostgresTest {
             TransferOperationOutcome.CONFIRMED,
             UUID.randomUUID(),
             beneficiary,
+            null,
             "beneficiary-transfer",
             100L,
             "DOP"));
@@ -142,6 +143,7 @@ class TransferEvidencePostgresTest extends AbstractPostgresTest {
     TransferOperationIdempotency found =
         entities.find(TransferOperationIdempotency.class, "k-pg-benef");
     assertThat(found.getBeneficiaryId()).isEqualTo(beneficiary);
+    assertThat(found.getDestinationAccountId()).isNull();
     assertThat(found.getPath()).isEqualTo("beneficiary-transfer");
   }
 
@@ -170,6 +172,7 @@ class TransferEvidencePostgresTest extends AbstractPostgresTest {
                               TransferOperationOutcome.CONFIRMED,
                               sourceId,
                               null,
+                              destinationId,
                               "direct",
                               100L,
                               "DOP"));
@@ -230,6 +233,7 @@ class TransferEvidencePostgresTest extends AbstractPostgresTest {
     assertThat(stored.getOperationId()).isEqualTo(result.operationId());
     assertThat(stored.getSourceAccountId()).isEqualTo(sourceId);
     assertThat(stored.getBeneficiaryId()).isNull();
+    assertThat(stored.getDestinationAccountId()).isEqualTo(destinationId);
     assertThat(stored.getPath()).isEqualTo("direct");
     assertThat(stored.getAmountMinorUnits()).isEqualTo(40_00L);
     assertThat(stored.getCurrency()).isEqualTo("DOP");
@@ -257,6 +261,7 @@ class TransferEvidencePostgresTest extends AbstractPostgresTest {
     assertThat(stored.getOutcome()).isEqualTo(TransferOperationOutcome.REJECTED);
     assertThat(stored.getSourceAccountId()).isEqualTo(sourceId);
     assertThat(stored.getBeneficiaryId()).isNull();
+    assertThat(stored.getDestinationAccountId()).isEqualTo(unknown);
     assertThat(stored.getPath()).isEqualTo("direct");
     assertThat(stored.getAmountMinorUnits()).isEqualTo(40_00L);
     assertThat(stored.getCurrency()).isEqualTo("DOP");

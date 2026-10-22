@@ -43,6 +43,7 @@ class TransferOperationIdempotencyInsertOnlyTest {
     String originalHash = "a".repeat(64);
     String replacementHash = "b".repeat(64);
     UUID originalSource = UUID.randomUUID();
+    UUID originalDestination = UUID.randomUUID();
     TransferOperationIdempotency original =
         new TransferOperationIdempotency(
             key,
@@ -51,6 +52,7 @@ class TransferOperationIdempotencyInsertOnlyTest {
             TransferOperationOutcome.REJECTED,
             originalSource,
             null,
+            originalDestination,
             "direct",
             100_00L,
             "DOP");
@@ -67,6 +69,7 @@ class TransferOperationIdempotencyInsertOnlyTest {
             TransferOperationOutcome.CONFIRMED,
             UUID.randomUUID(),
             null,
+            UUID.randomUUID(),
             "direct",
             200_00L,
             "DOP");

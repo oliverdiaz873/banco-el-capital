@@ -184,9 +184,7 @@ public class BeneficiaryService {
     if (!decision.allowed()) {
       throw forbidden(decision.reason());
     }
-    return beneficiaries
-        .findByIdAndOwnerCustomerId(beneficiaryId, owner)
-        .map(BeneficiaryService::viewOf);
+    return beneficiaries.findViewAndOwner(beneficiaryId, owner);
   }
 
   /**

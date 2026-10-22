@@ -23,11 +23,14 @@ import jakarta.persistence.Transient;
  * create a second financial effect. Same key plus incompatible payload is a conflict, resolved by
  * comparing the stored request hash. Each new key is a distinct monetary intent.
  *
- * <p>Intent columns (source, beneficiary-or-absent, path, amount, currency) persist the declared
- * intent for CONFIRMED and REJECTED outcomes so a repeated key can be proven same-or-different
- * without consulting live state. Rows predating V11 keep all five NULL (historical branch);
- * historical rows exist only as data, never through construction. The database CHECK constraints
- * below mirror V11 and remain the final arbiter.
+ * <p>Intent columns (source, beneficiary-or-absent, direct destination, path, amount, currency)
+ * persist the declared intent for CONFIRMED and REJECTED outcomes so a repeated key can be proven
+ * same-or-different without consulting live state. Rows predating V11 keep all intent columns NULL
+ * (historical/legacy branch); legacy rows exist only as data, never through construction. A direct
+ * destination is persisted only for direct transfers; beneficiary transfers keep it NULL because
+ * their destination is server-resolved execution evidence. The database CHECK constraints below
+ * mirror V11-V13 and remain the final arbiter. A CONFIRMED row always references its operation: V12
+ * rejects the combination at the database and construction rejects it in Java.
  */
 @Entity
 @Table(name = "transfer_operation_idempotency")
@@ -42,7 +45,10 @@ import jakarta.persistence.Transient;
   @Check(
       constraints =
           "(path is null or (path = 'direct' and beneficiary_id is null)"
-              + " or (path = 'beneficiary-transfer' and beneficiary_id is not null))")
+              + " or (path = 'beneficiary-transfer' and beneficiary_id is not null))"),
+  @Check(constraints = "(destination_account_id is null or path is not distinct from 'direct')"),
+  @Check(constraints = "(path is distinct from 'direct' or destination_account_id is not null)"),
+  @Check(constraints = "(outcome <> 'CONFIRMED' or operation_id is not null)")
 })
 public class TransferOperationIdempotency implements Persistable<String> {
 
@@ -74,6 +80,14 @@ public class TransferOperationIdempotency implements Persistable<String> {
   @Column(name = "beneficiary_id")
   private UUID beneficiaryId;
 
+  /**
+   * Client-supplied destination of a direct transfer, persisted for CONFIRMED and REJECTED
+   * outcomes. NULL on beneficiary transfers (server-resolved destination) and on legacy rows that
+   * predate V13.
+   */
+  @Column(name = "destination_account_id")
+  private UUID destinationAccountId;
+
   @Column(name = "path", length = 32)
   private String path;
 
@@ -95,12 +109,14 @@ public class TransferOperationIdempotency implements Persistable<String> {
       TransferOperationOutcome outcome,
       UUID sourceAccountId,
       UUID beneficiaryId,
+      UUID destinationAccountId,
       String path,
       Long amountMinorUnits,
       String currency) {
     if (path == null
         && (sourceAccountId != null
             || beneficiaryId != null
+            || destinationAccountId != null
             || amountMinorUnits != null
             || currency != null)) {
       throw new IllegalArgumentException("historical compatibility requires all intent null");
@@ -112,9 +128,13 @@ public class TransferOperationIdempotency implements Persistable<String> {
       throw new IllegalArgumentException("unknown intent path");
     }
     if (path != null
-        && ((path.equals("direct") && beneficiaryId != null)
-            || (path.equals("beneficiary-transfer") && beneficiaryId == null))) {
-      throw new IllegalArgumentException("beneficiary must match the intent path");
+        && ((path.equals("direct") && (beneficiaryId != null || destinationAccountId == null))
+            || (path.equals("beneficiary-transfer")
+                && (beneficiaryId == null || destinationAccountId != null)))) {
+      throw new IllegalArgumentException("beneficiary and destination must match the intent path");
+    }
+    if (outcome == TransferOperationOutcome.CONFIRMED && operationId == null) {
+      throw new IllegalArgumentException("confirmed outcome requires an operation reference");
     }
     this.idempotencyKey = idempotencyKey;
     this.operationId = operationId;
@@ -122,6 +142,7 @@ public class TransferOperationIdempotency implements Persistable<String> {
     this.outcome = outcome;
     this.sourceAccountId = sourceAccountId;
     this.beneficiaryId = beneficiaryId;
+    this.destinationAccountId = destinationAccountId;
     this.path = path;
     this.amountMinorUnits = amountMinorUnits;
     this.currency = currency;
@@ -166,6 +187,10 @@ public class TransferOperationIdempotency implements Persistable<String> {
 
   public UUID getBeneficiaryId() {
     return beneficiaryId;
+  }
+
+  public UUID getDestinationAccountId() {
+    return destinationAccountId;
   }
 
   public String getPath() {

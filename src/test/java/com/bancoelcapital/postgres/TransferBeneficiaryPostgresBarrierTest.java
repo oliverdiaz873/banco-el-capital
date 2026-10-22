@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
 
+import java.sql.Connection;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -14,13 +15,16 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import com.bancoelcapital.accounts.internal.AccountCreationCommand;
 import com.bancoelcapital.accounts.internal.AccountCreationService;
@@ -36,6 +40,7 @@ import com.bancoelcapital.financialops.transfer.TransferOperationException;
 import com.bancoelcapital.financialops.transfer.TransferResult;
 import com.bancoelcapital.financialops.transfer.TransferService;
 import com.bancoelcapital.identity.AuthenticatedActor;
+import com.bancoelcapital.identity.AuthorizationService;
 
 /**
  * E5 authoritative proof on real PostgreSQL (H2 mirrors live in {@code
@@ -58,6 +63,8 @@ class TransferBeneficiaryPostgresBarrierTest extends AbstractPostgresTest {
   @Autowired JdbcTemplate jdbc;
 
   @MockitoSpyBean BeneficiaryResolver resolver;
+
+  @MockitoSpyBean AuthorizationService authorization;
 
   String tag;
   UUID sourceId;
@@ -94,9 +101,34 @@ class TransferBeneficiaryPostgresBarrierTest extends AbstractPostgresTest {
   }
 
   @Test
-  void effectiveIsolationIsReadCommitted() {
-    assertThat(jdbc.queryForObject("select current_setting('transaction_isolation')", String.class))
-        .isEqualTo("read committed");
+  void serviceManagedWriteTransactionIsActiveAndReadCommitted() {
+    AtomicInteger calls = new AtomicInteger();
+    AtomicBoolean active = new AtomicBoolean();
+    AtomicReference<String> effectiveIsolation = new AtomicReference<>();
+    AtomicInteger configuredIsolation = new AtomicInteger(-1);
+    doAnswer(
+            invocation -> {
+              if (calls.incrementAndGet() == 2) {
+                active.set(TransactionSynchronizationManager.isActualTransactionActive());
+                effectiveIsolation.set(
+                    jdbc.queryForObject(
+                        "select current_setting('transaction_isolation')", String.class));
+                configuredIsolation.set(
+                    TransactionSynchronizationManager.getCurrentTransactionIsolationLevel());
+              }
+              return invocation.callRealMethod();
+            })
+        .when(authorization)
+        .decideTransfer(any(), any());
+
+    transfers.transfer(
+        new TransferCommand(sourceId, destinationId, 40_00L, "DOP"),
+        "tbp-isolation-" + tag,
+        sourceActor);
+
+    assertThat(active).isTrue();
+    assertThat(effectiveIsolation.get()).isEqualTo("read committed");
+    assertThat(configuredIsolation.get()).isEqualTo(Connection.TRANSACTION_READ_COMMITTED);
   }
 
   @Test
@@ -109,7 +141,7 @@ class TransferBeneficiaryPostgresBarrierTest extends AbstractPostgresTest {
     AtomicInteger calls = new AtomicInteger();
     doAnswer(
             invocation -> {
-              if (calls.incrementAndGet() == 2) {
+              if (calls.incrementAndGet() == 3) {
                 entered.countDown();
                 if (!gate.await(60, TimeUnit.SECONDS)) {
                   throw new IllegalStateException("barrier gate timeout");
@@ -159,7 +191,7 @@ class TransferBeneficiaryPostgresBarrierTest extends AbstractPostgresTest {
     AtomicInteger calls = new AtomicInteger();
     doAnswer(
             invocation -> {
-              if (calls.incrementAndGet() == 2) {
+              if (calls.incrementAndGet() == 3) {
                 Object result = invocation.callRealMethod();
                 entered.countDown();
                 if (!gate.await(60, TimeUnit.SECONDS)) {

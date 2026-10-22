@@ -13,7 +13,6 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import com.bancoelcapital.accounts.api.AccountLookupService;
-import com.bancoelcapital.accounts.internal.Account;
 import com.bancoelcapital.accounts.internal.AccountRepository;
 
 @ExtendWith(MockitoExtension.class)
@@ -32,15 +31,14 @@ class AccountLookupServiceTest {
 
   @Test
   void resolvesHolderForExistingAccount() {
-    when(accounts.findById(accountId))
-        .thenReturn(Optional.of(new Account(accountId, "holder-1", "DOP", "BASIC")));
+    when(accounts.findHolderCustomerIdById(accountId)).thenReturn(Optional.of("holder-1"));
 
     assertThat(service.findHolderCustomerId(accountId)).contains("holder-1");
   }
 
   @Test
   void emptyForUnknownOrNullAccount() {
-    when(accounts.findById(accountId)).thenReturn(Optional.empty());
+    when(accounts.findHolderCustomerIdById(accountId)).thenReturn(Optional.empty());
 
     assertThat(service.findHolderCustomerId(accountId)).isEmpty();
     assertThat(service.findHolderCustomerId(null)).isEmpty();
